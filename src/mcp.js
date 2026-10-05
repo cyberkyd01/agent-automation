@@ -1,5 +1,5 @@
 import { sseEvents } from './util.js';
-import { guessMime, formatBytes } from './files.js';
+import { guessMime, formatBytes, MAX_ATTACH_BYTES } from './files.js';
 
 const CONNECT_MS = 15000;
 const CALL_MS = 5 * 60 * 1000;
@@ -326,6 +326,24 @@ function basename(uri) {
   return p;
 }
 
+// Decoded size of base64 text, without decoding it.
+const base64Size = (b64) => {
+  const n = b64.length - (b64.match(/\s/g)?.length || 0);
+  return Math.max(0, Math.floor((n * 3) / 4) - (b64.endsWith('==') ? 2 : b64.endsWith('=') ? 1 : 0));
+};
+
+function base64ToBlob(b64, type) {
+  const clean = b64.replace(/\s+/g, '');
+  let bytes;
+  if (typeof Uint8Array.fromBase64 === 'function') bytes = Uint8Array.fromBase64(clean);
+  else {
+    const bin = atob(clean);
+    bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  }
+  return new Blob([bytes], { type });
+}
+
 // MCP tool result → { text, images }. Binary resources become assets the model can read_file / upload_file.
 export function mcpResult(r, ctx, label = 'from MCP') {
   const parts = [];
@@ -340,7 +358,12 @@ export function mcpResult(r, ctx, label = 'from MCP') {
         else if (typeof res.blob === 'string') {
           const name = basename(res.uri) || undefined;
           const mime = res.mimeType || (name ? guessMime(name) : 'application/octet-stream');
-          const a = ctx.addAsset(`data:${mime};base64,${res.blob}`, { label, name, mime });
+          const size = base64Size(res.blob);
+          if (size > MAX_ATTACH_BYTES) {
+            parts.push(`"${name || res.uri || 'A file'}" (${formatBytes(size)}) was not kept: files can be at most ${formatBytes(MAX_ATTACH_BYTES)}.`);
+            continue;
+          }
+          const a = ctx.addAsset(base64ToBlob(res.blob, mime), { label, name, mime });
           const use = /^image\//.test(a.mime || mime) ? 'view_image / upload_file / download' : 'read_file / upload_file / download';
           parts.push(`Received "${a.name || name || a.id}" (${a.mime || mime}, ${formatBytes(a.size ?? 0)}) as asset ${a.id} (shown to the user). Use it as source in ${use}.`);
         }

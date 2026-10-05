@@ -1,8 +1,8 @@
 import { Agent } from './src/agent.js';
-import { formatBytes } from './src/files.js';
+import { assetBlob, formatBytes } from './src/files.js';
 import { md, stripToolCalls } from './src/markdown.js';
 import { listModels, pickModel } from './src/providers.js';
-import { newSession, sessionToMarkdown, store, titleFrom } from './src/sessions.js';
+import { isZipFile, newSession, sessionToMarkdown, store, titleFrom } from './src/sessions.js';
 import { renderSettings } from './src/settings-ui.js';
 import { loadSettings, saveSettings, syncOriginRules } from './src/storage.js';
 import { newId, repoLink, safeParse, sleep, splitThink } from './src/util.js';
@@ -291,11 +291,36 @@ function thumbs(list, s) {
   return r;
 }
 
+// An object URL for an asset's Blob (thumbnails, Download links): one per Blob per chat, revoked when the
+// asset is discarded, the transcript is re-rendered or the chat closes. v1.0 inline images keep their data URL.
+function urlFor(s, a) {
+  if (typeof a?.src === 'string') return a.src;
+  let blob;
+  try {
+    blob = assetBlob(a);
+  } catch {
+    return '';
+  }
+  let url = s.urls.get(blob);
+  if (!url) s.urls.set(blob, (url = URL.createObjectURL(blob)));
+  return url;
+}
+
+function revokeUrls(s, a) {
+  const one = a && assetBlobOrNull(a);
+  const urls = a ? [[one, s.urls.get(one)]] : [...s.urls];
+  for (const [blob, url] of urls) {
+    if (!url) continue;
+    URL.revokeObjectURL(url);
+    s.urls.delete(blob);
+  }
+}
+
 // One attachment: a thumbnail for images we have bytes for, otherwise a type badge + name + size.
 function attachmentChip(a, { onRemove, s } = {}) {
-  const isImage = (a.kind === 'image' || /^image\//.test(a.mime || '')) && typeof a.dataUrl === 'string';
-  if (isImage) {
-    const t = thumb(a.dataUrl, { onRemove, label: a.name, s });
+  const src = (a.kind === 'image' || /^image\//.test(a.mime || '')) && s ? urlFor(s, a) : '';
+  if (src) {
+    const t = thumb(src, { onRemove, label: a.name, s });
     t.dataset.assetId = a.id || '';
     return t;
   }
@@ -579,15 +604,16 @@ function clearNoticeActions(s) {
   s.noticeActions.clear();
 }
 
-function fileName(id, src) {
-  const ext = (/^data:image\/([a-z0-9.+-]+)/i.exec(src)?.[1] || 'png').replace('jpeg', 'jpg').replace('svg+xml', 'svg');
+function fileName(id, mime) {
+  const ext = (/^image\/([a-z0-9.+-]+)/i.exec(mime || '')?.[1] || 'png').replace('jpeg', 'jpg').replace('svg+xml', 'svg');
   return `${String(id || 'image').replace(/[^\w.-]+/g, '_')}.${ext}`;
 }
 
 function assetCard(s, a) {
-  if (!a?.dataUrl) return;
-  const { id, dataUrl, label } = a;
-  const isImage = a.kind ? a.kind === 'image' : /^data:image\//i.test(dataUrl);
+  const url = a ? urlFor(s, a) : '';
+  if (!url) return;
+  const { id, label } = a;
+  const isImage = a.kind ? a.kind === 'image' : /^image\//i.test(a.mime || '');
   const card = el('div', isImage ? 'asset' : 'asset file');
   card.dataset.assetId = id || '';
   if (isImage) {
@@ -595,10 +621,10 @@ function assetCard(s, a) {
     open.title = 'Open in a new tab';
     const img = el('img');
     img.alt = a.name || label || id || 'Generated image';
-    img.src = dataUrl;
+    img.src = url;
     img.addEventListener('load', () => follow(s));
     open.append(img);
-    open.addEventListener('click', () => openImage(dataUrl));
+    open.addEventListener('click', () => openImage(url));
     card.append(open);
   } else {
     const head = el('div', 'asset-file');
@@ -618,8 +644,8 @@ function assetCard(s, a) {
     meta.append(l);
   }
   const dl = el('a', 'btn', 'Download');
-  dl.href = dataUrl;
-  dl.download = a.name || fileName(id, dataUrl);
+  dl.href = url;
+  dl.download = a.name || fileName(id, a.mime);
   const attach = button('btn', 'Attach', () => attachExisting(s, id));
   attach.title = 'Add to the message you are writing';
   attach.dataset.action = 'attach-asset';
@@ -647,7 +673,7 @@ function userText(m) {
 function attachmentInfo(s, ref) {
   const a = s.agent.assets.get(String(ref.id ?? ref).toLowerCase());
   if (typeof ref === 'string') return a ? { ...a } : { id: ref, kind: 'file', name: ref };
-  return { ...ref, dataUrl: a?.dataUrl, name: ref.name || a?.name };
+  return { ...ref, blob: a ? assetBlobOrNull(a) : null, name: ref.name || a?.name };
 }
 
 function userAttachments(s, m) {
@@ -658,7 +684,15 @@ function userAttachments(s, m) {
     : Array.isArray(m.content)
       ? m.content.filter((p) => p?.type === 'image_url').map((p) => p.image_url?.url)
       : [];
-  return legacy.filter(Boolean).map((dataUrl, i) => ({ id: `image ${i + 1}`, kind: 'image', dataUrl }));
+  return legacy.filter(Boolean).map((src, i) => ({ id: `image ${i + 1}`, kind: 'image', src }));
+}
+
+function assetBlobOrNull(a) {
+  try {
+    return assetBlob(a);
+  } catch {
+    return null;
+  }
 }
 
 function restoreAssets(s, m) {
@@ -671,6 +705,7 @@ const toolFailed = (m) => /^(error\b|cancelled\.|the user denied)/i.test(String(
 function renderTranscript(s) {
   s.restoring = true;
   s.chat.replaceChildren();
+  revokeUrls(s);
   const cards = new Map();
   try {
     for (const m of s.agent.messages) {
@@ -752,6 +787,7 @@ function createSession(meta, { stored = false, ready = false } = {}) {
     roBanner: null,
     loadBanner: null,
     assetBacklog: new Map(), // assets not yet written to the store
+    urls: new Map(), // Blob → object URL shown in this chat
     readOnly: false,
     lock: null,
     lockWait: null,
@@ -1117,11 +1153,9 @@ function setLoadBanner(s, text, canRetry) {
 
 async function openCopy(s) {
   try {
-    const file = await store.exportSession(s.id);
-    const [id] = await store.importFile(file);
-    if (!id) throw new Error('Nothing was copied.');
     const title = clip(`${s.meta.title} (copy)`, 80);
-    await store.rename(id, title).catch(() => {});
+    const id = await store.copySession(s.id, { title });
+    if (!id) throw new Error('Nothing was copied.');
     await openSession(id, { id, title });
   } catch (e) {
     notice(s, failText('Could not copy this chat', e), 'error');
@@ -1169,7 +1203,8 @@ async function persist(s) {
     if (s.stored) {
       for (const [id, a] of [...s.assetBacklog]) {
         if (s.closed) return;
-        await withTimeout(store.putAsset(s.id, a), STORE_TIMEOUT);
+        // Writing a big file to disk takes a while; allow about 5 MB/s on top of the usual limit.
+        await withTimeout(store.putAsset(s.id, a), STORE_TIMEOUT + Math.ceil((Number(a.size) || 0) / 5e6) * 1000);
         if (s.assetBacklog.get(id) === a) s.assetBacklog.delete(id);
       }
     }
@@ -1570,6 +1605,7 @@ async function closeSession(s, { save = true } = {}) {
     s.agent.stop();
     s.agent.reset(); // releases MCP connections
   } catch {}
+  revokeUrls(s);
   const ids = [...sessions.keys()];
   const i = ids.indexOf(s.id);
   sessions.delete(s.id);
@@ -1649,7 +1685,7 @@ function startTabRename(s) {
 function renderChips() {
   const s = active;
   if (!s) return;
-  const chips = s.pending.map((id) => attachmentChip(attachmentInfo(s, id), { onRemove: () => removePending(s, id) }));
+  const chips = s.pending.map((id) => attachmentChip(attachmentInfo(s, id), { onRemove: () => removePending(s, id), s }));
   for (const name of s.loadingNames) chips.push(loadingChip(name));
   attachRow.replaceChildren(...chips);
   attachRow.hidden = !chips.length;
@@ -1700,6 +1736,7 @@ function discardIfUnused(s, id) {
   if (!a || a.label !== 'attached') return;
   if (s.pending.includes(id) || s.queue.some((q) => q.attachmentIds.includes(id))) return;
   if (s.agent.messages.some((m) => m?._attachments?.some?.((x) => x?.id === id) || m?._assets?.includes?.(id))) return;
+  revokeUrls(s, a);
   s.agent.removeAsset(id);
   const unsaved = s.assetBacklog.delete(id);
   if (s.stored && !unsaved) store.deleteAsset(s.id, id).catch((e) => console.warn('Could not delete file', e));
@@ -2062,7 +2099,7 @@ function toggleRowActions(row) {
   for (const [action, label, cls] of [
     ['open', 'Open', 'primary'],
     ['rename', 'Rename'],
-    ['export-json', 'Export JSON'],
+    ['export-json', 'Export'],
     ['export-md', 'Export Markdown'],
     ['delete', 'Delete', 'danger'],
   ]) {
@@ -2232,7 +2269,8 @@ function downloadBlob(blob, name) {
   document.body.append(a);
   a.click();
   a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 60000);
+  // A big export takes a while to write to disk.
+  setTimeout(() => URL.revokeObjectURL(url), blob.size > 50e6 ? 600000 : 60000);
 }
 
 async function flushOne(id) {
@@ -2240,6 +2278,7 @@ async function flushOne(id) {
   if (s && (s.dirty || s.saveTimer || s.assetBacklog.size)) await Promise.race([saveNow(s), sleep(STORE_TIMEOUT)]);
 }
 
+// A chat with files exports as a .zip (manifest + the files themselves), one without as .json.
 async function exportJson(id) {
   await flushOne(id);
   let file;
@@ -2248,8 +2287,7 @@ async function exportJson(id) {
   } catch (e) {
     throw new Error(failText('Could not export the chat', e));
   }
-  const title = file?.sessions?.[0]?.title || metaOf(id)?.title;
-  downloadBlob(new Blob([JSON.stringify(file)], { type: 'application/json' }), exportName(title, 'json'));
+  downloadBlob(file.blob, exportName(file.title || metaOf(id)?.title, file.ext));
 }
 
 async function exportMarkdown(id) {
@@ -2268,7 +2306,7 @@ async function exportAll() {
   await flushAll();
   try {
     const file = await store.exportAll();
-    downloadBlob(new Blob([JSON.stringify(file)], { type: 'application/json' }), `agent-chats-all-${today()}.json`);
+    downloadBlob(file.blob, `agent-chats-all-${today()}.${file.ext}`);
   } catch (e) {
     historyMessage(failText('Could not export', e), 'error');
   }
@@ -2291,13 +2329,18 @@ async function importFiles(files) {
   const errors = [];
   for (const f of files) {
     try {
-      let obj;
-      try {
-        obj = JSON.parse(await readText(f));
-      } catch {
-        throw new Error('it is not a valid JSON file.');
+      let got;
+      // A .zip is read in place (never loaded whole); a .json export is parsed here.
+      if (await isZipFile(f)) got = await store.importFile(f);
+      else {
+        let obj;
+        try {
+          obj = JSON.parse(await readText(f));
+        } catch {
+          throw new Error('it is not a valid JSON file.');
+        }
+        got = await store.importFile(obj);
       }
-      const got = await store.importFile(obj);
       ids.push(...(Array.isArray(got) ? got : []));
     } catch (e) {
       errors.push(`${f.name}: ${errText(e)}`);

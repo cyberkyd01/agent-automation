@@ -318,6 +318,16 @@ export async function pageAct(a) {
       for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
       return { bytes, mime: m[1] || 'application/octet-stream' };
     };
+    // A file sent ahead in chunks by pageChunk(). It is taken out of the buffer whatever happens next.
+    const received = (t) => {
+      const map = globalThis.__aaTransfers;
+      const got = map && map.get(t.key);
+      if (map) map.delete(t.key);
+      if (!got) throw new Error('The file did not arrive in the page (it may have reloaded). Try again.');
+      const file = new File(got.parts, t.name, { type: t.mime || '' });
+      if (file.size !== t.size) throw new Error(`The file arrived incomplete (${file.size} of ${t.size} bytes). Try again.`);
+      return file;
+    };
 
     switch (a.type) {
       case 'locate': {
@@ -440,9 +450,14 @@ export async function pageAct(a) {
       }
       case 'upload': {
         const input = el.matches('input[type=file]') ? el : el.querySelector('input[type=file]') || (el.closest('label,form,div') || document).querySelector('input[type=file]');
-        if (!input) return { error: 'No file input found at that element. Target the input[type=file] (it may be hidden — use a CSS selector).' };
+        if (!input) {
+          if (a.transfer) globalThis.__aaTransfers?.delete(a.transfer.key);
+          return { error: 'No file input found at that element. Target the input[type=file] (it may be hidden — use a CSS selector).' };
+        }
+        if (a.probe) return { ok: true, desc: desc(input) };
         const dt = new DataTransfer();
-        for (const f of a.files) {
+        if (a.transfer) dt.items.add(received(a.transfer));
+        for (const f of a.files || []) {
           const { bytes, mime } = decode(f.dataUrl);
           dt.items.add(new File([bytes], f.name, { type: f.mime || mime }));
         }
@@ -452,15 +467,26 @@ export async function pageAct(a) {
         return { ok: true, desc: desc(input) };
       }
       case 'set_image': {
+        let src = a.dataUrl;
+        if (a.transfer) {
+          // A large image came in chunks; as a data URL it behaves like a small one (same page CSP rules).
+          const file = received(a.transfer);
+          src = await new Promise((resolve, reject) => {
+            const r = new FileReader();
+            r.onload = () => resolve(r.result);
+            r.onerror = () => reject(r.error);
+            r.readAsDataURL(file);
+          });
+        }
         show(el);
         flash(el);
         if (el.localName === 'img') {
           el.removeAttribute('srcset');
           const pic = el.closest('picture');
           if (pic) pic.querySelectorAll('source').forEach((s) => s.remove());
-          el.src = a.dataUrl;
+          el.src = src;
         } else {
-          el.style.backgroundImage = `url("${a.dataUrl}")`;
+          el.style.backgroundImage = `url("${src}")`;
         }
         return { ok: true, desc: desc(el) };
       }
@@ -491,6 +517,43 @@ export async function pageAct(a) {
     }
   } catch (e) {
     return { error: String(e && e.message ? e.message : e) };
+  }
+}
+
+// Receives a file in chunks (base64 of up to a few MB each), so no single executeScript message has to carry
+// the whole file. The chunks wait in the extension's isolated world, keyed per transfer, until pageAct's
+// upload / set_image takes them; op 'drop' discards a transfer that was cancelled.
+export function pageChunk(a) {
+  try {
+    const map = (globalThis.__aaTransfers = globalThis.__aaTransfers || new Map());
+    if (a.op === 'drop') {
+      map.delete(a.key);
+      return { ok: true, left: map.size };
+    }
+    if (a.index === 0) map.set(a.key, { parts: [], buf: null });
+    const t = map.get(a.key);
+    if (!t || t.parts.length !== a.index) {
+      map.delete(a.key);
+      return { error: 'The file transfer into the page was interrupted (the page may have reloaded). Try again.' };
+    }
+    let bytes;
+    if (typeof Uint8Array.prototype.setFromBase64 === 'function') {
+      // One decode buffer per transfer, reused for every chunk: the page allocates nothing per chunk but the Blob.
+      const need = Math.ceil(a.b64.length / 4) * 3;
+      if (!t.buf || t.buf.length < need) t.buf = new Uint8Array(need);
+      bytes = t.buf.subarray(0, t.buf.setFromBase64(a.b64).written);
+    } else if (typeof Uint8Array.fromBase64 === 'function') bytes = Uint8Array.fromBase64(a.b64);
+    else {
+      const bin = atob(a.b64);
+      bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    }
+    // The Blob copies the bytes, and lets the browser keep them out of this page's JavaScript heap.
+    t.parts.push(new Blob([bytes]));
+    return { ok: true };
+  } catch (e) {
+    globalThis.__aaTransfers?.delete(a.key);
+    return { error: 'The file could not be sent to the page: ' + (e && e.message ? e.message : e) };
   }
 }
 

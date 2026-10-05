@@ -1,7 +1,12 @@
-// Turns attached files into text a model can read, and converts between data URLs and bytes.
+// Turns attached files into text a model can read, gives access to an asset's bytes (assets hold a Blob),
+// and reads and writes ZIP archives without loading them whole.
 // Pure ES module: no chrome.* and no DOM requirement, so it also imports in Node for tests.
 
-export const MAX_ATTACH_BYTES = 30 * 1024 * 1024;
+export const MAX_ATTACH_BYTES = 100 * 1024 * 1024;
+// A data URL is ~4/3 of the file as one string; they are only made where an API needs one.
+export const MAX_DATA_URL_BYTES = 32 * 1024 * 1024;
+// Text files bigger than this are read as text only up to here.
+const TEXT_PREFIX_BYTES = 32 * 1024 * 1024;
 
 /* ---------- file types ---------- */
 
@@ -211,61 +216,101 @@ export function dataUrlToBytes(dataUrl) {
   return parseDataUrl(dataUrl).bytes;
 }
 
-export function bytesToDataUrl(bytes, mime) {
+// Base64 of the bytes, encoded in slices so no intermediate string is much bigger than the result.
+export function bytesToBase64(bytes) {
   if (bytes instanceof ArrayBuffer) bytes = new Uint8Array(bytes);
   else if (!(bytes instanceof Uint8Array)) bytes = new Uint8Array(bytes || 0);
-  let b64;
-  if (typeof bytes.toBase64 === 'function') b64 = bytes.toBase64();
-  else {
-    // btoa wants a string; build it in slices because spreading a big array overflows the stack.
-    const parts = [];
-    for (let i = 0; i < bytes.length; i += 0x8000) parts.push(String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000)));
-    b64 = btoa(parts.join(''));
-  }
+  if (typeof bytes.toBase64 === 'function') return bytes.toBase64();
+  // A multiple of 3 bytes per slice, so the slices' base64 can simply be joined.
+  const parts = [];
+  for (let i = 0; i < bytes.length; i += 0x6000) parts.push(btoa(String.fromCharCode.apply(null, bytes.subarray(i, i + 0x6000))));
+  return parts.join('');
+}
+
+export function bytesToDataUrl(bytes, mime) {
   const m = String(mime || 'application/octet-stream').trim() || 'application/octet-stream';
-  return `data:${m};base64,${b64}`;
+  return `data:${m};base64,${bytesToBase64(bytes)}`;
 }
 
-function readAsDataUrl(file, mime) {
-  if (typeof FileReader === 'function') {
-    return new Promise((resolve, reject) => {
-      const r = new FileReader();
-      r.onload = () => {
-        // The browser labels the data URL with the blob's own type, which may be empty; use ours.
-        const s = String(r.result);
-        resolve(`data:${mime};base64,${s.slice(s.indexOf(',') + 1)}`);
-      };
-      r.onerror = () => reject(r.error || new Error('read failed'));
-      r.readAsDataURL(file);
-    });
+/* ---------- assets: { id, kind, name, mime, size, blob, label, createdAt } ---------- */
+
+// Duck-typed, so Blobs from another realm (an iframe, a test DOM) count too.
+export const isBlob = (v) => !!v && typeof v === 'object' && typeof v.size === 'number' && typeof v.slice === 'function' && typeof v.arrayBuffer === 'function';
+
+// Megabytes for messages, to one decimal, rounded up: a file just over the limit must not read as the limit.
+const mbText = (n) => String(Math.ceil((n / 1048576) * 10 - 1e-9) / 10);
+
+// Throws the readable "too large" error for anything that would become an asset.
+export function checkAttachSize(size, name = 'The file') {
+  if (Number(size) > MAX_ATTACH_BYTES) throw new Error(`${name} is ${mbText(Number(size))} MB — the limit is ${MAX_ATTACH_BYTES / 1048576} MB.`);
+}
+
+// Blob/File, data URL or bytes → a Blob of type `mime`. For a Blob that is a typed view of the same data, not a copy.
+export function toBlob(content, mime) {
+  const type = cleanMime(mime);
+  if (isBlob(content)) return type && cleanMime(content.type) !== type ? content.slice(0, content.size, type) : content;
+  if (typeof content === 'string' && content.startsWith('data:')) {
+    const p = parseDataUrl(content);
+    return new Blob([p.bytes], { type: type || p.mime || 'application/octet-stream' });
   }
-  return file.arrayBuffer().then((buf) => bytesToDataUrl(new Uint8Array(buf), mime));
+  if (content instanceof Uint8Array || content instanceof ArrayBuffer) return new Blob([content], { type: type || 'application/octet-stream' });
+  throw new Error('File content must be a file, a Blob or a data: URL.');
 }
 
-const mbText = (n) => {
-  const mb = n / 1048576;
-  return mb >= 100 ? String(Math.round(mb)) : mb.toFixed(1).replace(/\.0$/, '');
-};
+// The content of an asset. Records saved by earlier builds held a data URL instead of a Blob.
+const legacyBlobs = new WeakMap();
+export function assetBlob(asset) {
+  if (isBlob(asset)) return asset;
+  if (isBlob(asset?.blob)) return asset.blob;
+  if (typeof asset?.dataUrl === 'string' && asset.dataUrl.startsWith('data:')) {
+    let b = legacyBlobs.get(asset);
+    if (!b) legacyBlobs.set(asset, (b = toBlob(asset.dataUrl, asset.mime)));
+    return b;
+  }
+  throw new Error(`The data of ${asset?.name || asset?.id || 'this file'} is missing.`);
+}
 
+export async function assetBytes(asset) {
+  return new Uint8Array(await assetBlob(asset).arrayBuffer());
+}
+
+// Only for APIs that truly need a data URL (model image parts, small page previews). Rejects above `max`.
+export async function assetDataUrl(asset, max = MAX_DATA_URL_BYTES) {
+  const blob = assetBlob(asset);
+  if (blob.size > max) {
+    throw new Error(`${asset?.name || asset?.id || 'The file'} is ${mbText(blob.size)} MB — too large to convert to a data URL (the limit for that is ${mbText(max)} MB).`);
+  }
+  const mime = cleanMime(asset?.mime || blob.type) || 'application/octet-stream';
+  return bytesToDataUrl(new Uint8Array(await blob.arrayBuffer()), mime);
+}
+
+// The caller owns the URL and must revoke it.
+export const assetObjectUrl = (asset) => URL.createObjectURL(assetBlob(asset));
+
+// File/Blob → the content fields of an Asset. Cheap: the file is not read (a File is already a Blob).
 export async function fileToAssetData(file, name) {
-  if (!file || typeof file.size !== 'number') throw new Error('That is not a file that can be attached.');
-  const fileName = String(name || file.name || 'file');
-  if (file.size > MAX_ATTACH_BYTES) {
-    throw new Error(`${fileName} is ${mbText(file.size)} MB — the limit is ${MAX_ATTACH_BYTES / 1048576} MB.`);
+  if (!file || typeof file !== 'object' || typeof file.size !== 'number' || (typeof file.slice !== 'function' && typeof file.arrayBuffer !== 'function')) {
+    throw new Error('That is not a file that can be attached.');
   }
+  const fileName = String(name || file.name || 'file');
+  checkAttachSize(file.size, fileName);
   let mime = cleanMime(file.type);
   // Browsers mislabel some source files (.ts is reported as video/mp2t), so a known text extension wins.
   const byExt = TYPES[extOf(fileName)];
   if (!mime || mime === 'application/octet-stream' || (byExt && byExt[0] === 'text' && classify('', mime).kind !== 'text')) {
     mime = guessMime(fileName, mime || 'application/octet-stream');
   }
-  let dataUrl;
+  let blob;
   try {
-    dataUrl = await readAsDataUrl(file, mime);
+    if (isBlob(file)) {
+      // One byte proves the file is still there and readable, without reading it.
+      if (file.size) await file.slice(0, 1).arrayBuffer();
+      blob = toBlob(file, mime);
+    } else blob = new Blob([await file.arrayBuffer()], { type: mime });
   } catch {
     throw new Error(`Could not read ${fileName}. It may have been moved or deleted — try attaching it again.`);
   }
-  return { name: fileName, mime, size: file.size, dataUrl };
+  return { name: fileName, mime, size: file.size, blob };
 }
 
 /* ---------- text ---------- */
@@ -319,7 +364,19 @@ function decodeBytes(bytes, strict = false) {
   return strict ? null : new TextDecoder().decode(bytes);
 }
 
-function textResult(bytes, name, known) {
+// Drops a UTF-8 character cut in half at the end (a prefix of a bigger file can end mid-character).
+function wholeUtf8(bytes) {
+  let i = bytes.length - 1;
+  while (i > 0 && i > bytes.length - 4 && (bytes[i] & 0xc0) === 0x80) i--;
+  const lead = bytes[i];
+  const need = lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc0 ? 2 : 1;
+  return i + need > bytes.length ? bytes.subarray(0, i) : bytes;
+}
+
+// Reads at most TEXT_PREFIX_BYTES of the blob, so a huge log or CSV never becomes one enormous string.
+async function textResult(blob, name, known) {
+  const cut = blob.size > TEXT_PREFIX_BYTES;
+  let bytes = new Uint8Array(await blob.slice(0, cut ? TEXT_PREFIX_BYTES : blob.size).arrayBuffer());
   const utf16 = (bytes[0] === 0xff && bytes[1] === 0xfe) || (bytes[0] === 0xfe && bytes[1] === 0xff);
   const utf32 = bytes[0] === 0xff && bytes[1] === 0xfe && bytes[2] === 0 && bytes[3] === 0;
   if (utf32) return { kind: 'binary', text: '', note: 'This text file uses an unusual encoding (UTF-32) that cannot be read here. Re-save it as UTF-8.' };
@@ -327,14 +384,16 @@ function textResult(bytes, name, known) {
     const head = bytes.subarray(0, 8192);
     if (head.indexOf(0) >= 0) return { kind: 'binary', text: '', note: binaryNote(name) };
   }
+  if (cut) bytes = utf16 ? bytes.subarray(0, bytes.length & ~1) : wholeUtf8(bytes);
+  const partial = cut ? `This file is ${formatBytes(blob.size)}; only its first ${mbText(TEXT_PREFIX_BYTES)} MB were read as text.` : '';
   const strict = decodeBytes(bytes, true);
-  if (strict != null) return { kind: 'text', text: normalizeNewlines(strict) };
+  if (strict != null) return partial ? { kind: 'text', text: normalizeNewlines(strict), note: partial } : { kind: 'text', text: normalizeNewlines(strict) };
   // Not UTF-8. A file named like text (e.g. a CSV from Excel) is almost always Windows-1252.
   if (!known) return { kind: 'binary', text: '', note: binaryNote(name) };
   return {
     kind: 'text',
     text: normalizeNewlines(new TextDecoder('windows-1252').decode(bytes)),
-    note: 'This file is not UTF-8, so it was read as Windows-1252. Some accented characters may look wrong.',
+    note: ['This file is not UTF-8, so it was read as Windows-1252. Some accented characters may look wrong.', partial].filter(Boolean).join(' '),
   };
 }
 
@@ -468,22 +527,55 @@ const findChild = (el, local) => {
   return null;
 };
 
-/* ---------- ZIP (Office files) ---------- */
+/* ---------- ZIP: Office files, chat exports ---------- */
 
-class ZipError extends Error {
-  constructor(code) {
+// code: 'notzip' | 'ole' | 'zip64' | 'encrypted' | 'method' | 'corrupt' | 'toolarge' | 'crc' | 'nomain'
+export class ZipError extends Error {
+  constructor(code, entry = '') {
     super(code);
+    this.name = 'ZipError';
     this.code = code;
+    this.entry = entry;
   }
 }
 
 const MAX_PART_BYTES = 128 * 1024 * 1024; // guards against decompression bombs
+const SLICE_BYTES = 8 * 1024 * 1024;
 
-function readZipDirectory(bytes) {
-  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+const readAt = async (blob, start, end) => new Uint8Array(await blob.slice(start, end).arrayBuffer());
+
+let crcTable = null;
+function crcUpdate(crc, bytes) {
+  if (!crcTable) {
+    crcTable = new Int32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      crcTable[n] = c;
+    }
+  }
+  const t = crcTable;
+  let c = ~crc;
+  for (let i = 0; i < bytes.length; i++) c = t[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+  return ~c >>> 0;
+}
+
+// CRC-32 of a Blob, read a slice at a time.
+export async function crc32(blob) {
+  let crc = 0;
+  for (let at = 0; at < blob.size; at += SLICE_BYTES) crc = crcUpdate(crc, await readAt(blob, at, Math.min(blob.size, at + SLICE_BYTES)));
+  return crc;
+}
+
+// The central directory, read from the end of the blob: only the directory itself is loaded.
+async function zipDirectory(blob) {
+  const size = blob.size;
+  const tailStart = Math.max(0, size - (22 + 0xffff + 20));
+  const tail = await readAt(blob, tailStart, size);
+  const dv = new DataView(tail.buffer, tail.byteOffset, tail.byteLength);
   let eocd = -1;
-  for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 22 - 0xffff); i--) {
-    if (dv.getUint32(i, true) === 0x06054b50 && i + 22 + dv.getUint16(i + 20, true) <= bytes.length) {
+  for (let i = tail.length - 22; i >= Math.max(0, tail.length - 22 - 0xffff); i--) {
+    if (dv.getUint32(i, true) === 0x06054b50 && i + 22 + dv.getUint16(i + 20, true) <= tail.length) {
       eocd = i;
       break;
     }
@@ -494,24 +586,27 @@ function readZipDirectory(bytes) {
   const cdOffset = dv.getUint32(eocd + 16, true);
   const hasLocator = eocd >= 20 && dv.getUint32(eocd - 20, true) === 0x07064b50;
   if (hasLocator || total === 0xffff || cdSize === 0xffffffff || cdOffset === 0xffffffff) throw new ZipError('zip64');
-  if (cdOffset + cdSize > eocd) throw new ZipError('corrupt');
+  if (cdOffset + cdSize > tailStart + eocd) throw new ZipError('corrupt');
 
+  const cd = await readAt(blob, cdOffset, cdOffset + cdSize);
+  const cv = new DataView(cd.buffer, cd.byteOffset, cd.byteLength);
   const entries = new Map();
   const utf8 = new TextDecoder();
-  let p = cdOffset;
+  let p = 0;
   for (let n = 0; n < total; n++) {
-    if (p + 46 > bytes.length || dv.getUint32(p, true) !== 0x02014b50) throw new ZipError('corrupt');
-    const flags = dv.getUint16(p + 8, true);
-    const method = dv.getUint16(p + 10, true);
-    const csize = dv.getUint32(p + 20, true);
-    const usize = dv.getUint32(p + 24, true);
-    const nameLen = dv.getUint16(p + 28, true);
-    const extraLen = dv.getUint16(p + 30, true);
-    const commentLen = dv.getUint16(p + 32, true);
-    const offset = dv.getUint32(p + 42, true);
+    if (p + 46 > cd.length || cv.getUint32(p, true) !== 0x02014b50) throw new ZipError('corrupt');
+    const flags = cv.getUint16(p + 8, true);
+    const method = cv.getUint16(p + 10, true);
+    const crc = cv.getUint32(p + 16, true);
+    const csize = cv.getUint32(p + 20, true);
+    const usize = cv.getUint32(p + 24, true);
+    const nameLen = cv.getUint16(p + 28, true);
+    const extraLen = cv.getUint16(p + 30, true);
+    const commentLen = cv.getUint16(p + 32, true);
+    const offset = cv.getUint32(p + 42, true);
     if (csize === 0xffffffff || usize === 0xffffffff || offset === 0xffffffff) throw new ZipError('zip64');
-    const name = utf8.decode(bytes.subarray(p + 46, p + 46 + nameLen)).replace(/\\/g, '/');
-    entries.set(name, { name, flags, method, csize, usize, offset });
+    const name = utf8.decode(cd.subarray(p + 46, p + 46 + nameLen)).replace(/\\/g, '/');
+    entries.set(name, { name, flags, method, crc, csize, usize, offset });
     p += 46 + nameLen + extraLen + commentLen;
   }
   return entries;
@@ -554,35 +649,72 @@ async function inflateRaw(data, limit) {
   return out;
 }
 
-async function openZip(bytes) {
+// Inflates a stored-compressed blob into a new Blob, a few MB at a time (never one big array).
+async function inflateToBlob(raw, limit, type) {
+  const reader = raw.stream().pipeThrough(new DecompressionStream('deflate-raw')).getReader();
+  const parts = [];
+  let group = [];
+  let groupSize = 0;
+  let total = 0;
+  let crc = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.length;
+    if (total > limit) {
+      reader.cancel().catch(() => {});
+      throw new ZipError('toolarge');
+    }
+    crc = crcUpdate(crc, value);
+    group.push(value);
+    groupSize += value.length;
+    if (groupSize >= SLICE_BYTES) {
+      parts.push(new Blob(group));
+      group = [];
+      groupSize = 0;
+    }
+  }
+  if (group.length) parts.push(new Blob(group));
+  return { blob: new Blob(parts, { type }), crc };
+}
+
+// Reads a ZIP archive through Blob.slice: the central directory and the entries asked for, nothing else.
+export async function readZip(blob) {
   // Password-protected Office files are not ZIPs at all: they are old-style compound files.
-  if (bytes[0] === 0xd0 && bytes[1] === 0xcf && bytes[2] === 0x11 && bytes[3] === 0xe0) throw new ZipError('ole');
-  const entries = readZipDirectory(bytes);
+  const magic = await readAt(blob, 0, 4);
+  if (magic[0] === 0xd0 && magic[1] === 0xcf && magic[2] === 0x11 && magic[3] === 0xe0) throw new ZipError('ole');
+  const entries = await zipDirectory(blob);
   const lower = new Map([...entries].map(([k, v]) => [k.toLowerCase(), v]));
-  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const find = (name) => entries.get(name) || lower.get(name.toLowerCase()) || null;
+  // The entry's raw (possibly compressed) data as a slice of the archive.
+  const rawOf = async (e) => {
+    if (e.flags & 1) throw new ZipError('encrypted', e.name);
+    // Sizes come from the central directory: with the data-descriptor flag the local header's are zero.
+    const lh = await readAt(blob, e.offset, e.offset + 30);
+    const lv = new DataView(lh.buffer, lh.byteOffset, lh.byteLength);
+    if (lh.length < 30 || lv.getUint32(0, true) !== 0x04034b50) throw new ZipError('corrupt', e.name);
+    const start = e.offset + 30 + lv.getUint16(26, true) + lv.getUint16(28, true);
+    if (start + e.csize > blob.size) throw new ZipError('corrupt', e.name);
+    return blob.slice(start, start + e.csize);
+  };
   const bytesOf = async (name) => {
     const e = find(name);
     if (!e) return null;
-    if (e.flags & 1) throw new ZipError('encrypted');
-    // Sizes come from the central directory: with the data-descriptor flag the local header's are zero.
-    if (e.offset + 30 > bytes.length || dv.getUint32(e.offset, true) !== 0x04034b50) throw new ZipError('corrupt');
-    const start = e.offset + 30 + dv.getUint16(e.offset + 26, true) + dv.getUint16(e.offset + 28, true);
-    if (start + e.csize > bytes.length) throw new ZipError('corrupt');
-    const raw = bytes.subarray(start, start + e.csize);
+    const raw = await readAt(await rawOf(e), 0, e.csize);
     if (e.method === 0) return raw;
     if (e.method === 8) {
       try {
         return await inflateRaw(raw, MAX_PART_BYTES);
       } catch (err) {
-        throw err instanceof ZipError ? err : new ZipError('corrupt');
+        throw err instanceof ZipError ? err : new ZipError('corrupt', e.name);
       }
     }
-    throw new ZipError('method');
+    throw new ZipError('method', e.name);
   };
   return {
     names: [...entries.keys()],
     has: (name) => !!find(name),
+    entry: find,
     bytes: bytesOf,
     async text(name) {
       const b = await bytesOf(name);
@@ -592,7 +724,99 @@ async function openZip(bytes) {
       const s = await this.text(name);
       return s == null ? null : parseXml(s);
     },
+    // The entry as a Blob: a slice of the archive when stored, inflated otherwise. `verify` checks its CRC-32.
+    async blob(name, { type = '', limit = MAX_PART_BYTES, verify = false } = {}) {
+      const e = find(name);
+      if (!e) return null;
+      const raw = await rawOf(e);
+      let out;
+      let crc;
+      if (e.method === 0) {
+        if (e.csize > limit) throw new ZipError('toolarge', e.name);
+        out = raw.slice(0, raw.size, type);
+        if (verify) crc = await crc32(out);
+      } else if (e.method === 8) {
+        try {
+          ({ blob: out, crc } = await inflateToBlob(raw, limit, type));
+        } catch (err) {
+          throw err instanceof ZipError ? err : new ZipError('corrupt', e.name);
+        }
+      } else throw new ZipError('method', e.name);
+      if (verify && (crc !== e.crc || out.size !== e.usize)) throw new ZipError('crc', e.name);
+      return out;
+    },
   };
+}
+
+function dosTime(d) {
+  const year = Math.min(2107, Math.max(1980, d.getFullYear()));
+  return {
+    time: (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1),
+    date: ((year - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate(),
+  };
+}
+
+// The largest archive writeZip can make: ZIP64 is not written, so every offset must fit in 32 bits.
+export const MAX_ZIP_BYTES = 0xffffffff;
+
+// [{ name, data: Blob | string }] → a ZIP Blob with stored (uncompressed) entries. The Blob is assembled
+// from the entries' own Blobs, so the files are referenced, not copied; only the CRC pass reads them.
+export async function writeZip(entries, { date = new Date() } = {}) {
+  const enc = new TextEncoder();
+  const { time, date: day } = dosTime(date);
+  const parts = [];
+  const central = [];
+  let offset = 0;
+  if (entries.length >= 0xffff) throw new ZipError('zip64');
+  for (const e of entries) {
+    const data = typeof e.data === 'string' ? new Blob([enc.encode(e.data)]) : e.data;
+    const name = enc.encode(e.name);
+    const size = data.size;
+    if (offset + 30 + name.length + size > MAX_ZIP_BYTES) throw new ZipError('zip64');
+    const crc = await crc32(data);
+    const local = new Uint8Array(30 + name.length);
+    const lv = new DataView(local.buffer);
+    lv.setUint32(0, 0x04034b50, true);
+    lv.setUint16(4, 20, true); // version needed
+    lv.setUint16(6, 0x0800, true); // UTF-8 names
+    lv.setUint16(8, 0, true); // stored
+    lv.setUint16(10, time, true);
+    lv.setUint16(12, day, true);
+    lv.setUint32(14, crc, true);
+    lv.setUint32(18, size, true);
+    lv.setUint32(22, size, true);
+    lv.setUint16(26, name.length, true);
+    lv.setUint16(28, 0, true);
+    local.set(name, 30);
+    const cen = new Uint8Array(46 + name.length);
+    const cv = new DataView(cen.buffer);
+    cv.setUint32(0, 0x02014b50, true);
+    cv.setUint16(4, 20, true); // made by
+    cv.setUint16(6, 20, true);
+    cv.setUint16(8, 0x0800, true);
+    cv.setUint16(10, 0, true);
+    cv.setUint16(12, time, true);
+    cv.setUint16(14, day, true);
+    cv.setUint32(16, crc, true);
+    cv.setUint32(20, size, true);
+    cv.setUint32(24, size, true);
+    cv.setUint16(28, name.length, true);
+    cv.setUint32(42, offset, true);
+    cen.set(name, 46);
+    parts.push(local, data);
+    central.push(cen);
+    offset += local.length + size;
+  }
+  const cdSize = central.reduce((n, c) => n + c.length, 0);
+  if (offset + cdSize + 22 > MAX_ZIP_BYTES) throw new ZipError('zip64');
+  const end = new Uint8Array(22);
+  const ev = new DataView(end.buffer);
+  ev.setUint32(0, 0x06054b50, true);
+  ev.setUint16(8, entries.length, true);
+  ev.setUint16(10, entries.length, true);
+  ev.setUint32(12, cdSize, true);
+  ev.setUint32(16, offset, true);
+  return new Blob([...parts, ...central, end], { type: 'application/zip' });
 }
 
 // 'xl/workbook.xml' -> 'xl/'
@@ -1109,9 +1333,10 @@ async function extractPptx(zip) {
   return { text: out.join('\n\n') };
 }
 
-async function extractOffice(kind, bytes) {
+// Only the parts that hold text are read from the blob, so a big workbook is never loaded whole.
+async function extractOffice(kind, blob) {
   try {
-    const zip = await openZip(bytes);
+    const zip = await readZip(blob);
     const r = await { docx: extractDocx, xlsx: extractXlsx, pptx: extractPptx }[kind](zip);
     return { kind, ...r };
   } catch (e) {
@@ -1222,8 +1447,8 @@ async function extractPdf(bytes) {
   let task;
   let timer;
   try {
-    // pdf.js transfers the buffer to its worker, so hand it a copy.
-    task = pdfjs.getDocument({ data: bytes.slice(), isEvalSupported: false, useWorkerFetch: false, disableFontFace: true, verbosity: 0 });
+    // pdf.js transfers the buffer to its worker; these bytes were read just for it, so no copy is needed.
+    task = pdfjs.getDocument({ data: bytes, isEvalSupported: false, useWorkerFetch: false, disableFontFace: true, verbosity: 0 });
     const read = (async () => {
       const doc = await task.promise;
       const pages = Math.min(doc.numPages, MAX_PDF_PAGES);
@@ -1265,30 +1490,35 @@ async function extractPdf(bytes) {
 
 /* ---------- entry point ---------- */
 
+// `file`: { blob, name, mime } (or { dataUrl, name, mime } for small inline content).
 export async function extractText(file) {
   let kind = 'binary';
   try {
-    const { dataUrl, name = '', mime = '' } = file || {};
-    const parsed = parseDataUrl(dataUrl);
-    const { bytes } = parsed;
-    const c = classify(name, mime || parsed.mime);
+    const { blob: given, dataUrl, name = '', mime = '' } = file || {};
+    let blob = given;
+    if (!isBlob(blob)) {
+      const parsed = parseDataUrl(dataUrl);
+      blob = new Blob([parsed.bytes], { type: parsed.mime });
+    }
+    const type = mime || blob.type;
+    const c = classify(name, type);
     kind = c.kind;
-    const svg = extOf(name) === 'svg' || cleanMime(mime || parsed.mime) === 'image/svg+xml';
-    if (!bytes.length) return { kind: svg ? 'text' : kind, text: '', note: 'The file is empty.' };
+    const svg = extOf(name) === 'svg' || cleanMime(type) === 'image/svg+xml';
+    if (!blob.size) return { kind: svg ? 'text' : kind, text: '', note: 'The file is empty.' };
     if (kind === 'image' && !svg) return { kind, text: '', note: 'This is an image, so there is no text to extract.' };
-    if (svg) return textResult(bytes, name, true);
+    if (svg) return await textResult(blob, name, true);
     switch (kind) {
       case 'pdf':
-        return await extractPdf(bytes);
+        return await extractPdf(new Uint8Array(await blob.arrayBuffer()));
       case 'docx':
       case 'xlsx':
       case 'pptx':
-        return await extractOffice(kind, bytes);
+        return await extractOffice(kind, blob);
       case 'text':
-        return textResult(bytes, name, c.known);
+        return await textResult(blob, name, c.known);
       default:
         // Unknown type: if it holds no NUL bytes and is valid UTF-8 it is text after all.
-        return c.known ? { kind, text: '', note: binaryNote(name) } : textResult(bytes, name, false);
+        return c.known ? { kind, text: '', note: binaryNote(name) } : await textResult(blob, name, false);
     }
   } catch (e) {
     const why = /not a data URL/.test(e?.message) ? 'The attachment data is missing or damaged.' : `The file could not be read (${String(e?.message || e).slice(0, 160)}).`;

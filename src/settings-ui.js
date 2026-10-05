@@ -459,9 +459,10 @@ export function renderSettings(container, settings, { save, onProvidersChanged }
   about.append(el('p', 'about-name', `${appName} ${version}`), el('p', 'hint', 'Open source under the MIT licence.'));
   const rate = repoLink('btn primary', '★ Rate on GitHub');
   const issues = repoLink('btn', 'Report an issue', '/issues');
-  if (rate && issues) {
+  const guide = repoLink('btn', 'User guide', '/blob/main/docs/USER_GUIDE.md');
+  if (rate && issues && guide) {
     const links = el('div', 'about-links');
-    links.append(rate, issues);
+    links.append(rate, issues, guide);
     about.append(links);
   }
 

@@ -13,8 +13,8 @@ export const APPROVAL_OPTIONS = [
 ];
 
 export const QUEUE_MODES = [
-  ['auto', 'Run queued prompts back to back'],
-  ['step', 'Pause after each queued prompt'],
+  ['auto', 'Run all (start the next prompt straight away)'],
+  ['step', 'One at a time (wait for you after each prompt)'],
 ];
 
 const NAME_RE = /^[A-Za-z0-9_-]+$/;

@@ -1,7 +1,7 @@
-import { pageRead, pageAct, mainEval } from './page.js';
+import { pageRead, pageAct, pageChunk, mainEval } from './page.js';
 import { cdp, cdpClick, cdpInsertText, cdpKey, cdpEval } from './cdp.js';
-import { sleep, pause, blobToDataUrl, httpError, safeParse, mimeOf, dataUrlSize, withExt } from './util.js';
-import { extractText, formatBytes, guessMime, MAX_ATTACH_BYTES } from './files.js';
+import { sleep, pause, blobToDataUrl, httpError, safeParse, mimeOf, withExt } from './util.js';
+import { extractText, formatBytes, guessMime, MAX_ATTACH_BYTES, MAX_DATA_URL_BYTES, assetBlob, assetDataUrl, bytesToBase64, toBlob } from './files.js';
 
 /* ---------- page plumbing ---------- */
 
@@ -103,6 +103,9 @@ function withScheme(u) {
   return (/^(localhost|127\.|\[::1\])/i.test(u) ? 'http://' : 'https://') + u;
 }
 
+// fetch_url reads at most this much of a text response.
+const FETCH_TEXT_BYTES = 32 * 1024 * 1024;
+
 // Keeps paginated output under the agent's truncation limit so the "more" note survives.
 const room = (ctx) => Math.max(1000, (Number(ctx.settings.maxToolChars) || 12000) - 400);
 
@@ -156,29 +159,36 @@ function parseKey(args) {
 
 /* ---------- images ---------- */
 
+// `src`: a Blob or a (data:) URL.
 async function decodeImage(src) {
-  const blob = await (await fetch(src)).blob();
+  const blob = typeof src === 'string' ? await (await fetch(src)).blob() : src;
   try {
     return await createImageBitmap(blob);
   } catch {
     // SVG (and a few other formats) only decode through an <img>.
-    const img = new Image();
-    img.src = src;
-    await img.decode();
-    return img;
+    const url = typeof src === 'string' ? src : URL.createObjectURL(blob);
+    try {
+      const img = new Image();
+      img.src = url;
+      await img.decode();
+      return img;
+    } finally {
+      if (url !== src) URL.revokeObjectURL(url);
+    }
   }
 }
 
-// Re-encodes an image, scaling it down to maxW (and maxSide for the longer side). Returns the input
-// untouched when nothing would change, unless `force`.
+// Re-encodes an image (a Blob or data URL), scaling it down to maxW (and maxSide for the longer side).
+// Returns the input as is when nothing would change and it is small, unless `force`.
 async function encode(src, { maxW = Infinity, maxSide = Infinity, type = 'image/jpeg', quality = 0.8, force = false } = {}) {
   const img = await decodeImage(src);
   const w0 = img.naturalWidth || img.width || 512;
   const h0 = img.naturalHeight || img.height || 512;
   const k = Math.min(1, maxW / w0, maxSide / Math.max(w0, h0));
-  if (k === 1 && !force && src.startsWith(`data:${type}`)) {
+  const same = typeof src === 'string' ? src.startsWith(`data:${type}`) : src.type === type && src.size <= 4e6;
+  if (k === 1 && !force && same) {
     img.close?.();
-    return { dataUrl: src, width: w0, height: h0, origWidth: w0, origHeight: h0 };
+    return { dataUrl: typeof src === 'string' ? src : await blobToDataUrl(src), width: w0, height: h0, origWidth: w0, origHeight: h0 };
   }
   const w = Math.max(1, Math.round(w0 * k));
   const h = Math.max(1, Math.round(h0 * k));
@@ -195,20 +205,21 @@ async function encode(src, { maxW = Infinity, maxSide = Infinity, type = 'image/
   return { dataUrl, width: w, height: h, origWidth: w0, origHeight: h0 };
 }
 
-const toPng = async (dataUrl) => (await encode(dataUrl, { type: 'image/png' })).dataUrl;
-const preview = (dataUrl) => encode(dataUrl, { maxW: 1024 });
+const toPng = async (src) => (await encode(src, { type: 'image/png' })).dataUrl;
+const preview = (src) => encode(src, { maxW: 1024 });
 
 const MODEL_IMAGE = /^image\/(png|jpeg|gif|webp)$/;
 
-// An image attachment as a provider will accept it: PNG/JPEG/GIF/WebP of a few MB at most.
+// An image attachment as a provider will accept it (a data URL): PNG/JPEG/GIF/WebP of a few MB at most.
 // Other formats and very large files are re-encoded; null when that is impossible.
 export async function modelImage(asset) {
-  const mime = asset.mime || mimeOf(asset.dataUrl);
-  if (MODEL_IMAGE.test(mime) && (asset.size || dataUrlSize(asset.dataUrl)) <= 4e6) return asset.dataUrl;
+  const mime = assetMime(asset);
+  const blob = assetBlob(asset);
+  if (MODEL_IMAGE.test(mime) && blob.size <= 4e6) return assetDataUrl(asset);
   try {
-    return (await encode(asset.dataUrl, { maxSide: 2048, quality: 0.85, force: true })).dataUrl;
+    return (await encode(toBlob(blob, mime), { maxSide: 2048, quality: 0.85, force: true })).dataUrl;
   } catch {
-    return MODEL_IMAGE.test(mime) ? asset.dataUrl : null;
+    return MODEL_IMAGE.test(mime) && blob.size <= MAX_DATA_URL_BYTES ? assetDataUrl(asset) : null;
   }
 }
 
@@ -244,7 +255,46 @@ export async function toDataUrl(url, signal) {
 
 /* ---------- files and assets ---------- */
 
-const tooBig = (n) => `The file is too large (${formatBytes(n)}; the limit is ${formatBytes(MAX_ATTACH_BYTES)}).`;
+const tooBig = (n) => `The file is too large (${n > MAX_ATTACH_BYTES ? formatBytes(n) : `over ${formatBytes(MAX_ATTACH_BYTES)}`}; the limit is ${formatBytes(MAX_ATTACH_BYTES)}).`;
+const SLICE_BYTES = 8 * 1024 * 1024;
+
+// A response body as a Blob, collected a few MB at a time. Stops downloading as soon as it passes
+// MAX_ATTACH_BYTES: → { blob } or { tooBig: bytes seen }.
+async function readBody(res) {
+  const type = res.headers.get('content-type') || '';
+  const len = Number(res.headers.get('content-length'));
+  if (len > MAX_ATTACH_BYTES) {
+    res.body?.cancel().catch(() => {});
+    return { tooBig: len };
+  }
+  if (!res.body?.getReader) {
+    const blob = await res.blob();
+    return blob.size > MAX_ATTACH_BYTES ? { tooBig: blob.size } : { blob };
+  }
+  const reader = res.body.getReader();
+  const parts = [];
+  let group = [];
+  let groupSize = 0;
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.length;
+    if (total > MAX_ATTACH_BYTES) {
+      reader.cancel().catch(() => {});
+      return { tooBig: total };
+    }
+    group.push(value);
+    groupSize += value.length;
+    if (groupSize >= SLICE_BYTES) {
+      parts.push(new Blob(group));
+      group = [];
+      groupSize = 0;
+    }
+  }
+  if (group.length) parts.push(new Blob(group));
+  return { blob: new Blob(parts, { type }) };
+}
 
 // A file name for a fetched resource: Content-Disposition, else the URL's last path segment; always with an extension.
 function nameFor(url, mime, disposition = '') {
@@ -269,22 +319,17 @@ async function looksTextual(blob) {
 async function fetchFile(url, signal) {
   const res = await fetch(url, { credentials: 'include', signal });
   if (!res.ok) throw await httpError(res);
-  const len = Number(res.headers.get('content-length'));
-  if (len > MAX_ATTACH_BYTES) {
-    res.body?.cancel().catch(() => {});
-    throw new Error(tooBig(len));
-  }
-  const blob = await res.blob();
-  if (blob.size > MAX_ATTACH_BYTES) throw new Error(tooBig(blob.size));
+  const { blob, tooBig: n } = await readBody(res);
+  if (!blob) throw new Error(tooBig(n));
   let mime = (blob.type || 'application/octet-stream').split(';')[0].trim().toLowerCase();
   const name = nameFor(res.url || url, mime, res.headers.get('content-disposition') || '');
   if (mime === 'application/octet-stream') mime = guessMime(name, mime);
-  return { dataUrl: await blobToDataUrl(blob), name, mime };
+  return { blob: toBlob(blob, mime), name, mime };
 }
 
 const ASSET_ID = /^(img|file)[_\s-]?(\d+)$/i;
 
-const assetMime = (a) => a.mime || mimeOf(a.dataUrl);
+const assetMime = (a) => a.mime || a.blob?.type || mimeOf(a.dataUrl);
 const assetName = (a) => a.name || withExt(a.id, assetMime(a));
 
 function findAsset(s, ctx) {
@@ -298,29 +343,29 @@ function findAsset(s, ctx) {
   throw new Error(`There is no asset ${id}. ${ids.length ? `Available assets: ${list.join(', ')}.` : 'This chat has no assets yet.'}`);
 }
 
-// A tool's `source`: an asset id, "screenshot", "element:<id>", a data: URL or a web URL → { dataUrl, name?, mime, asset? }.
+// A tool's `source`: an asset id, "screenshot", "element:<id>", a data: URL or a web URL → { blob, name?, mime, asset? }.
 async function resolveFile(source, ctx, tabId) {
   const s = String(source ?? '').trim();
   const asset = findAsset(s, ctx);
-  if (asset) return { dataUrl: asset.dataUrl, name: assetName(asset), mime: assetMime(asset), asset };
+  if (asset) return { blob: assetBlob(asset), name: assetName(asset), mime: assetMime(asset), asset };
   if (s.toLowerCase() === 'screenshot') {
     const { dataUrl } = await capture(tabId ?? (await tabOf({}, ctx)));
-    return { dataUrl, name: 'screenshot.jpg', mime: 'image/jpeg' };
+    return { blob: toBlob(dataUrl), name: 'screenshot.jpg', mime: 'image/jpeg' };
   }
   const el = /^(?:element:\s*)?(\d+)$/i.exec(s);
   if (el) {
     const r = await act(tabId ?? (await tabOf({}, ctx)), { type: 'image_src', id: el[1] });
-    return r.src.startsWith('data:') ? { dataUrl: r.src, mime: mimeOf(r.src) } : fetchFile(r.src, ctx.signal);
+    return r.src.startsWith('data:') ? { blob: toBlob(r.src), mime: mimeOf(r.src) } : fetchFile(r.src, ctx.signal);
   }
-  if (s.startsWith('data:')) return { dataUrl: s, mime: mimeOf(s) };
+  if (s.startsWith('data:')) return { blob: toBlob(s), mime: mimeOf(s) };
   if (/^https?:\/\//i.test(s)) return fetchFile(s, ctx.signal);
   throw new Error('Invalid source. Use an asset id (img_1, file_1), "screenshot", "element:<id>" from read_page, or a URL.');
 }
 
-// resolveFile for tools that need an image; returns its data URL.
+// resolveFile for tools that need an image; returns it as a Blob of its image type.
 async function resolveSource(source, ctx, tabId) {
   const f = await resolveFile(source, ctx, tabId);
-  if (/^image\//.test(f.mime) || (!f.asset && f.mime === 'application/octet-stream')) return f.dataUrl;
+  if (/^image\//.test(f.mime) || (!f.asset && f.mime === 'application/octet-stream')) return toBlob(f.blob, f.mime);
   throw new Error(
     f.asset
       ? `${f.asset.id} ("${f.name}") is not an image (${f.mime}). Use read_file to read it, or upload_file / download.`
@@ -337,13 +382,106 @@ async function readText(file) {
   }
 }
 
-const texts = new WeakMap();
+// Extracted text per asset (keyed by its Blob), least recently used first out once the total passes the
+// budget: paging through a big PDF or CSV, or the next run's <attachments> block, must not re-extract it.
+const TEXT_CACHE_CHARS = 64 * 1024 * 1024;
+const TEXT_CACHE_ENTRIES = 64;
+const texts = new Map(); // Blob → { p, chars }
+let textChars = 0;
 
-// Memoised per asset: paging through a long PDF shouldn't re-parse it on every call. Never rejects.
+function trimTexts() {
+  for (const [k, e] of texts) {
+    if ((textChars <= TEXT_CACHE_CHARS && texts.size <= TEXT_CACHE_ENTRIES) || texts.size <= 1) break;
+    texts.delete(k);
+    textChars -= e.chars;
+  }
+}
+
+// Never rejects.
 export function assetText(asset) {
-  let p = texts.get(asset);
-  if (!p) texts.set(asset, (p = readText({ dataUrl: asset.dataUrl, name: assetName(asset), mime: assetMime(asset) })));
-  return p;
+  let blob;
+  try {
+    blob = assetBlob(asset);
+  } catch (e) {
+    return Promise.resolve({ kind: 'binary', text: '', note: e.message });
+  }
+  const hit = texts.get(blob);
+  if (hit) {
+    texts.delete(blob);
+    texts.set(blob, hit);
+    return hit.p;
+  }
+  const entry = { p: null, chars: 0 };
+  entry.p = readText({ blob, name: assetName(asset), mime: assetMime(asset) }).then((x) => {
+    if (texts.get(blob) === entry) {
+      entry.chars = x.text.length;
+      textChars += entry.chars;
+      trimTexts();
+    }
+    return x;
+  });
+  texts.set(blob, entry);
+  return entry.p;
+}
+
+/* ---------- files into pages, files to Downloads ---------- */
+
+// Raw bytes per executeScript call (base64 makes the message 4/3 of that). Measured with 100 MB in Chrome:
+// 8 MB is no faster than 4 MB and leaves more garbage behind in the page between collections.
+const CHUNK_BYTES = 4 * 1024 * 1024;
+const DROP_MS = 5000;
+
+// Sends a Blob into the page's isolated world CHUNK_BYTES at a time (each executeScript message stays small),
+// runs fn(transfer) — a pageAct call that takes the file — and always clears the page-side buffer afterwards,
+// on success, error or Stop.
+async function withTransfer(tabId, blob, info, signal, fn) {
+  const key = `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+  try {
+    const n = Math.max(1, Math.ceil(blob.size / CHUNK_BYTES));
+    for (let i = 0; i < n; i++) {
+      signal?.throwIfAborted();
+      const bytes = new Uint8Array(await blob.slice(i * CHUNK_BYTES, (i + 1) * CHUNK_BYTES).arrayBuffer());
+      const r = await inject(tabId, pageChunk, { key, index: i, b64: bytesToBase64(bytes) });
+      if (!r) throw new Error('No response from page.');
+      if (r.error) throw new Error(r.error);
+    }
+    signal?.throwIfAborted();
+    return await fn({ key, name: info.name, mime: info.mime, size: blob.size });
+  } finally {
+    await Promise.race([inject(tabId, pageChunk, { op: 'drop', key }).catch(() => {}), sleep(DROP_MS)]);
+  }
+}
+
+// Object URLs handed to chrome.downloads are revoked once Chrome has the file (or gave up), or after a while.
+const DOWNLOAD_URL_MS = 10 * 60 * 1000;
+const downloadUrls = new Map(); // download id → release()
+let watchingDownloads = false;
+
+function watchDownloads() {
+  if (watchingDownloads || !chrome.downloads?.onChanged) return;
+  watchingDownloads = true;
+  chrome.downloads.onChanged.addListener((d) => {
+    const state = d.state?.current;
+    if (state === 'complete' || state === 'interrupted') downloadUrls.get(d.id)?.();
+  });
+}
+
+function revokeWhenDone(id, url) {
+  let timer = 0;
+  const release = () => {
+    clearTimeout(timer);
+    downloadUrls.delete(id);
+    URL.revokeObjectURL(url);
+  };
+  timer = setTimeout(release, DOWNLOAD_URL_MS);
+  downloadUrls.set(id, release);
+  // It may have finished before we knew its id.
+  Promise.resolve(chrome.downloads.search?.({ id }))
+    .then((items) => {
+      const st = items?.[0]?.state;
+      if (st === 'complete' || st === 'interrupted') release();
+    })
+    .catch(() => {});
 }
 
 // One page of a long text, with read_page-style pagination notes. `next(end)` says how to get more.
@@ -435,7 +573,7 @@ async function makeImages(ctx, prompt, src, size) {
 async function assetResult(urls, label, ctx) {
   const assets = urls.map((u) => ctx.addAsset(u, label));
   const images = [];
-  if (ctx.vision()) for (const a of assets) images.push((await preview(a.dataUrl)).dataUrl);
+  if (ctx.vision()) for (const a of assets) images.push((await preview(toBlob(assetBlob(a), a.mime))).dataUrl);
   return {
     text: `Created ${assets.map((a) => a.id).join(', ')} (shown to the user). Use it as source in upload_file / set_page_image / download / edit_image.`,
     images,
@@ -909,13 +1047,8 @@ export const TOOLS = [
       }
       const type = res.headers.get('content-type') || '';
       const head = `HTTP ${res.status}${res.url && res.url !== url ? ` (redirected to ${res.url})` : ''} — ${type || 'unknown type'}`;
-      const len = Number(res.headers.get('content-length'));
-      if (len > MAX_ATTACH_BYTES) {
-        res.body?.cancel().catch(() => {});
-        return `${head}\n${tooBig(len)} Use download to save it, or open_tab to view it.`;
-      }
-      const blob = await res.blob();
-      if (blob.size > MAX_ATTACH_BYTES) return `${head}\n${tooBig(blob.size)} Use download to save it, or open_tab to view it.`;
+      const { blob, tooBig: n } = await readBody(res);
+      if (!blob) return `${head}\n${tooBig(n)} Use download to save it, or open_tab to view it.`;
       const isImage = /^image\//i.test(type);
       const textual = !isImage && (type ? /^text\/|json|xml|javascript|ecmascript|csv|yaml|urlencoded/i.test(type) : await looksTextual(blob));
       if (!textual) {
@@ -924,15 +1057,18 @@ export const TOOLS = [
         let mime = type.split(';')[0].trim().toLowerCase() || 'application/octet-stream';
         const name = nameFor(res.url || url, mime, res.headers.get('content-disposition') || '');
         if (mime === 'application/octet-stream') mime = guessMime(name, mime);
-        const a = ctx.addAsset(await blobToDataUrl(blob), { label: 'fetched', name, mime });
+        const a = ctx.addAsset(toBlob(blob, mime), { label: 'fetched', name, mime });
         if (/^image\//.test(mime)) return `${head}\nSaved the image as ${a.id} (shown to the user). Use it as source in view_image / upload_file / download / edit_image.`;
         const saved = `Saved as ${a.id} "${a.name || name}" (${formatBytes(blob.size)}, shown to the user); use it as source in upload_file / download.`;
         const x = await assetText(a);
         if (!x.text) return `${head}\n${saved}\n${x.note || 'It cannot be read as text.'}`;
         return `${head}\n${saved} Its text:\n\n${paginate(x.text, args, ctx, (end) => `call read_file with source "${a.id}" and offset=${end}`)}`;
       }
-      let text = await blob.text();
+      // Like read_file: a huge text response is only read up to FETCH_TEXT_BYTES.
+      const cut = blob.size > FETCH_TEXT_BYTES;
+      let text = await (cut ? blob.slice(0, FETCH_TEXT_BYTES) : blob).text();
       if (/html/i.test(type) || (!type && /^\s*<(!doctype|html)/i.test(text))) text = htmlToText(text);
+      if (cut) text += `\n[only the first ${formatBytes(FETCH_TEXT_BYTES)} of ${formatBytes(blob.size)} were read]`;
       const off = Math.max(0, Number(args.offset) || 0);
       const max = Math.min(Number(args.max_chars) || 12000, room(ctx));
       const part = text.slice(off, off + max);
@@ -968,7 +1104,7 @@ export const TOOLS = [
       try {
         p = await preview(src);
       } catch {
-        throw new Error(`The image could not be decoded (${mimeOf(src)}). If it is a document, use read_file.`);
+        throw new Error(`The image could not be decoded (${src.type || 'unknown type'}). If it is a document, use read_file.`);
       }
       return { text: `Image ${args.source} (${p.origWidth}x${p.origHeight}px).`, images: [p.dataUrl] };
     },
@@ -980,15 +1116,17 @@ export const TOOLS = [
     run: async (args, ctx) => {
       const f = await resolveFile(args.source, ctx);
       const name = f.name || withExt('file', f.mime);
-      const x = f.asset ? await assetText(f.asset) : await readText({ dataUrl: f.dataUrl, name, mime: f.mime });
-      const head = `File: ${f.asset ? f.asset.id + ' ' : ''}"${name}" (${f.mime}, ${formatBytes(f.asset?.size || dataUrlSize(f.dataUrl))})`;
+      const x = f.asset ? await assetText(f.asset) : await readText({ blob: f.blob, name, mime: f.mime });
+      const head = `File: ${f.asset ? f.asset.id + ' ' : ''}"${name}" (${f.mime}, ${formatBytes(f.asset?.size || f.blob.size)})`;
       if (!x.text) {
         // files.js has its own note for images; the model needs the pointer to view_image instead.
         const why = /^image\//.test(f.mime) ? 'This is an image, not a document — use view_image to look at it.' : x.note || 'No text could be extracted from this file.';
         return `${head}\n${why}`;
       }
       const src = String(args.source ?? '').trim();
-      return `${head}\n\n${paginate(x.text, args, ctx, (end) => `call read_file with source "${f.asset?.id || src}" and offset=${end}`)}`;
+      // A partial read (a huge text file, a long workbook) says so on the first page.
+      const why = x.note && !(Number(args.offset) > 0) ? `\nNote: ${x.note}` : '';
+      return `${head}${why}\n\n${paginate(x.text, args, ctx, (end) => `call read_file with source "${f.asset?.id || src}" and offset=${end}`)}`;
     },
   },
   {
@@ -1002,7 +1140,9 @@ export const TOOLS = [
       const f = await resolveFile(args.source, ctx, tabId);
       const name = has(args.filename) ? String(args.filename) : f.name || withExt(/^image\//.test(f.mime) ? 'image' : 'file', f.mime);
       const mime = f.mime === 'application/octet-stream' ? guessMime(name, f.mime) : f.mime;
-      const r = await act(tabId, { ...t, type: 'upload', files: [{ dataUrl: f.dataUrl, name, mime }] });
+      // Find the input first, so a big file is not sent to a page that has nowhere to put it.
+      if (f.blob.size > CHUNK_BYTES) await act(tabId, { ...t, type: 'upload', probe: true });
+      const r = await withTransfer(tabId, f.blob, { name, mime }, ctx.signal, (transfer) => act(tabId, { ...t, type: 'upload', transfer }));
       return `Uploaded ${name} to ${r.desc}.`;
     },
   },
@@ -1013,8 +1153,14 @@ export const TOOLS = [
     run: async (args, ctx) => {
       const tabId = await tabOf(args, ctx);
       const t = target(args);
-      const dataUrl = await resolveSource(args.source, ctx, tabId);
-      const r = await act(tabId, { ...t, type: 'set_image', dataUrl });
+      const img = await resolveSource(args.source, ctx, tabId);
+      if (img.size > MAX_DATA_URL_BYTES) {
+        throw new Error(`That image is ${formatBytes(img.size)}; set_page_image previews images up to ${formatBytes(MAX_DATA_URL_BYTES)}. Use upload_file to put it into the page.`);
+      }
+      const r =
+        img.size <= CHUNK_BYTES
+          ? await act(tabId, { ...t, type: 'set_image', dataUrl: await blobToDataUrl(img) })
+          : await withTransfer(tabId, img, { name: 'image', mime: img.type }, ctx.signal, (transfer) => act(tabId, { ...t, type: 'set_image', transfer }));
       return `Replaced the image of ${r.desc}. This is a visual preview only — nothing was saved to the site (use upload_file to really upload).`;
     },
   },
@@ -1026,15 +1172,25 @@ export const TOOLS = [
     run: async (args, ctx) => {
       const s = String(args.source ?? '').trim();
       let url = s;
+      let objectUrl = null;
       let filename = has(args.filename) ? String(args.filename) : '';
       if (!/^https?:\/\//i.test(s)) {
         const f = await resolveFile(s, ctx);
-        url = f.dataUrl;
+        // An object URL, not a data URL: Chrome limits URL length, and the file is not copied into a string.
+        url = objectUrl = URL.createObjectURL(toBlob(f.blob, f.mime));
         if (!filename) filename = f.name || withExt(/^image\//.test(f.mime) ? 'image' : 'file', f.mime);
       }
       // chrome.downloads rejects absolute paths, '..' and reserved characters.
       filename = filename.replace(/[<>:"|?*\\\x00-\x1f]/g, '_').replace(/\.\.+/g, '.').replace(/^[/.]+/, '');
-      const id = await chrome.downloads.download({ url, ...(filename ? { filename } : {}) });
+      if (objectUrl) watchDownloads();
+      let id;
+      try {
+        id = await chrome.downloads.download({ url, ...(filename ? { filename } : {}) });
+      } catch (e) {
+        if (objectUrl) URL.revokeObjectURL(objectUrl);
+        throw e;
+      }
+      if (objectUrl) revokeWhenDone(id, objectUrl);
       return `Download started (id ${id})${filename ? ` as ${filename}` : ''}.`;
     },
   },

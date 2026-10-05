@@ -2,6 +2,8 @@
 
 An AI agent in Chrome's side panel. Connect a local model (LM Studio, Ollama) or any cloud API, pick a model, and ask it to work on the page beside it: read it, click, type, fill forms, reply to enquiries, or apply the same change across many rows. It can also research the web in other tabs, generate and edit images, and act as a general assistant for questions that have nothing to do with the current page.
 
+**[User guide](docs/USER_GUIDE.md)**: a tour of the panel, step-by-step recipes for common jobs, every setting, and troubleshooting.
+
 Version 1.1 adds:
 
 - **Chat tabs and saved history.** Keep several chats open at once, and come back to any chat later.
@@ -120,8 +122,8 @@ Click the clock icon in the header to open **History**:
 
 - **Search chats** looks at each chat's title, first message and page address. Tick **This site** to show only chats that were started on the site of the current browser tab.
 - Click a chat to open it, from any web page, and continue it where it stopped.
-- The **…** button on a chat shows **Rename**, **Export JSON** (includes the attached files), **Export Markdown** (a readable transcript) and **Delete**.
-- **Import** adds chats from `.json` export files, and always as new chats; it never overwrites one. **Export all** saves every chat to one file, as a backup.
+- The **…** button on a chat shows **Rename**, **Export**, **Export Markdown** (a readable transcript) and **Delete**. **Export** saves a `.zip` that includes the chat's files (attachments and files the agent created), or a `.json` file when the chat has no files.
+- **Import** adds chats from `.zip` and `.json` export files (including exports from older versions), and always as new chats; it never overwrites one. **Export all** saves every chat as one `.zip`, as a backup.
 
 ## Queue and batch jobs
 
@@ -142,7 +144,7 @@ The **Batch jobs** button (the list icon beside the paperclip) queues many jobs 
 
 ## Attaching files
 
-Attach files with the paperclip button, by pasting into the message box, or by dragging them onto the panel. Any file type is accepted, up to 30 MB each.
+Attach files with the paperclip button, by pasting into the message box, or by dragging them onto the panel. Any file type is accepted, up to 100 MB each.
 
 What the model can read as text:
 
@@ -203,7 +205,7 @@ Details, options and troubleshooting are in [`companion/README.md`](companion/RE
 
 ## Safety and control
 
-- **Ask before acting** (default): the agent asks for approval before clicks, typing, running scripts, uploads, downloads, non-GET requests and tools from MCP servers (except tools a server marks as read-only). **Allow all (this chat)** approves everything for the rest of the current conversation.
+- **Ask before acting** (default): the agent asks for approval before actions that change something: clicking, typing, choosing from a list, pressing keys, closing tabs, running scripts, uploading, downloading, sending non-GET web requests, and tools from MCP servers (except tools a server marks as read-only). Reading pages, scrolling, opening and switching tabs, searching and screenshots never ask. **Allow all (this chat)** approves everything for the rest of the current conversation.
 - **Act without asking**: no approval prompts for browser actions, for unattended bulk work.
 - The **Stop** button (or **Esc**) halts a run at any point.
 - Page content is treated as data, not instructions, but no model is immune to prompt injection. Be careful with **Act without asking** on sites you don't control, and review replies before letting the agent send messages to customers.
@@ -264,6 +266,7 @@ Computer tools run with the permissions of your user account. They can read, cha
 | `src/util.js` | Shared helpers |
 | `vendor/pdfjs/` | Mozilla pdf.js (Apache-2.0), used to read PDF text |
 | `companion/` | The companion program, its tests and its README |
+| `docs/` | The [user guide](docs/USER_GUIDE.md) and its screenshots |
 | `icons/` | Extension icons |
 | `scripts/package.sh` | Builds the release zip into `dist/` |
 | `LICENSE` | MIT licence |

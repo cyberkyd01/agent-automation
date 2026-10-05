@@ -3,7 +3,7 @@ import { chat } from './providers.js';
 import { McpPool, companionServer } from './mcp.js';
 import { detachAll } from './cdp.js';
 import { splitThink, pause, isImageMime, mimeOf, dataUrlSize, withExt } from './util.js';
-import { fileToAssetData, formatBytes, guessMime } from './files.js';
+import { assetBlob, checkAttachSize, fileToAssetData, formatBytes, guessMime, isBlob, toBlob } from './files.js';
 
 function systemPrompt(settings, { computer = false } = {}) {
   let s = `You are Agent Automation, an AI agent running in a Chrome side panel next to the user's browser tabs. You act on the user's behalf in their own browser: reading pages, clicking, typing, filling forms, replying to messages, running bulk operations, researching on the web and working with images and files. You are also a general assistant — answer any question, whether or not it relates to the open page.
@@ -153,6 +153,12 @@ function shareBudget(lengths, budget) {
 
 const describe = (a) => `${a.id} "${a.name}" (${a.mime}, ${formatBytes(a.size)})`;
 
+// Image parts of restored chats name their asset instead of carrying its bytes; they become data URLs
+// only when a request is sent (see Agent.withImages).
+const ASSET_IMAGE = 'asset:';
+const MODEL_IMAGE = /^image\/(png|jpeg|gif|webp)$/;
+const hasAssetImage = (m) => Array.isArray(m?.content) && m.content.some((p) => p?.type === 'image_url' && String(p.image_url?.url || '').startsWith(ASSET_IMAGE));
+
 /* ---------- agent ---------- */
 
 export class Agent {
@@ -169,14 +175,15 @@ export class Agent {
     this.capsByModel = new Map();
     this.caps = {};
     this.mcp = new McpPool();
+    this.imageUrls = new WeakMap(); // asset → Promise<data URL | null>, for restored image attachments
     this.ctx = {
       settings: null,
       signal: null,
       tabId: null,
       windowId: null,
       vision: () => this.ctx.settings?.vision !== 'off' && !this.caps.noImages,
-      // info: { label, name?, mime? } — or just a label (v1.0 callers).
-      addAsset: (dataUrl, info) => this.addAsset(dataUrl, info, true),
+      // content: a Blob/File or a data: URL. info: { label, name?, mime? } — or just a label (v1.0 callers).
+      addAsset: (content, info) => this.addAsset(content, info, true),
       getAsset: (id) => this.assets.get(String(id).trim().toLowerCase()),
       listAssets: () => [...this.assets.values()],
     };
@@ -214,16 +221,19 @@ export class Agent {
 
   /* ----- assets ----- */
 
-  addAsset(dataUrl, info, show) {
+  // content: a Blob/File (held as is, never read here) or a data: URL (tools, MCP and image APIs produce those).
+  addAsset(content, info, show) {
     if (typeof info === 'string' || info == null) info = { label: info || '' };
-    if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:')) throw new Error('Asset content must be a data: URL.');
+    const isUrl = typeof content === 'string' && content.startsWith('data:');
+    if (!isUrl && !isBlob(content)) throw new Error('Asset content must be a file or a data: URL.');
     const name = String(info.name || '').split(/[\\/]/).pop().trim();
-    const urlMime = mimeOf(dataUrl);
+    const ownMime = isUrl ? mimeOf(content) : String(content.type || '').split(';')[0].trim().toLowerCase() || 'application/octet-stream';
     let mime = String(info.mime || '').split(';')[0].trim().toLowerCase();
-    if (!mime) mime = urlMime === 'application/octet-stream' && name ? guessMime(name, urlMime) : urlMime;
+    if (!mime) mime = ownMime === 'application/octet-stream' && name ? guessMime(name, ownMime) : ownMime;
     if (mime === 'image/jpg') mime = 'image/jpeg';
-    // Keep the data URL's own type right: providers and pages read it from there.
-    if (mime !== urlMime) dataUrl = dataUrl.replace(/^data:[^;,]*/, `data:${mime}`);
+    checkAttachSize(isUrl ? dataUrlSize(content) : content.size, name || 'The file');
+    // The Blob carries the asset's type: pages and downloads read it from there.
+    const blob = toBlob(content, mime);
     const kind = isImageMime(mime) ? 'image' : 'file';
     const id = kind === 'image' ? `img_${++this.counters.img}` : `file_${++this.counters.file}`;
     const asset = {
@@ -231,8 +241,8 @@ export class Agent {
       kind,
       name: name || withExt(id, mime),
       mime,
-      size: Number(info.size) || dataUrlSize(dataUrl),
-      dataUrl,
+      size: blob.size,
+      blob,
       label: info.label || '',
       createdAt: Date.now(),
     };
@@ -248,9 +258,10 @@ export class Agent {
   }
 
   // A file the user attached. Not shown as an asset card (the panel shows it as an attachment).
+  // The file is not read: its Blob is kept, and persisted by the panel.
   async attach(file, name) {
     const d = await fileToAssetData(file, name);
-    return this.addAsset(d.dataUrl, { label: 'attached', name: d.name, mime: d.mime, size: d.size }, false);
+    return this.addAsset(d.blob, { label: 'attached', name: d.name, mime: d.mime }, false);
   }
 
   removeAsset(id) {
@@ -425,8 +436,39 @@ export class Agent {
     }
   }
 
+  // Resolves 'asset:<id>' image parts: those of the two most recent such messages become data URLs (providers
+  // only send the latest images anyway), older ones are dropped. Returns `messages` itself when there are none.
+  async withImages(messages, signal) {
+    if (!messages.some(hasAssetImage)) return messages;
+    const out = messages.slice();
+    let kept = 0;
+    for (let i = out.length - 1; i >= 0; i--) {
+      if (!hasAssetImage(out[i])) continue;
+      const keep = kept++ < 2;
+      const parts = [];
+      for (const p of out[i].content) {
+        const url = p?.type === 'image_url' ? String(p.image_url?.url || '') : '';
+        if (!url.startsWith(ASSET_IMAGE)) parts.push(p);
+        else if (keep) {
+          const a = this.assets.get(url.slice(ASSET_IMAGE.length));
+          const data = a ? await abortable(this.imageUrl(a), signal) : null;
+          if (data) parts.push({ type: 'image_url', image_url: { url: data } });
+        }
+      }
+      out[i] = { ...out[i], content: parts };
+    }
+    return out;
+  }
+
+  imageUrl(a) {
+    let p = this.imageUrls.get(a);
+    if (!p) this.imageUrls.set(a, (p = modelImage(a).catch(() => null)));
+    return p;
+  }
+
   // One model turn, retried on transient failures as long as nothing was streamed yet.
   async request({ system, settings, signal, ...rest }, history) {
+    const messages = [{ role: 'system', content: system }, ...(await this.withImages(trimHistory(history, settings.contextChars), signal))];
     for (let attempt = 0; ; attempt++) {
       const view = this.ui.assistantStart();
       let partial = {};
@@ -435,7 +477,7 @@ export class Agent {
           ...rest,
           settings,
           signal,
-          messages: [{ role: 'system', content: system }, ...trimHistory(history, settings.contextChars)],
+          messages,
           onDelta: (d) => {
             partial = d;
             view.update(d);
@@ -582,11 +624,18 @@ export class Agent {
     repair(messages);
     this.assets.clear();
     for (const a of Array.isArray(assets) ? assets : []) {
-      if (!a || typeof a.id !== 'string' || typeof a.dataUrl !== 'string') continue;
-      const mime = a.mime || mimeOf(a.dataUrl);
+      if (!a || typeof a.id !== 'string') continue;
+      let blob;
+      try {
+        blob = assetBlob(a); // also accepts an asset saved with a data URL by an earlier build
+      } catch {
+        continue;
+      }
+      const { dataUrl, ...rest } = a;
+      const mime = a.mime || String(blob.type || '').split(';')[0] || 'application/octet-stream';
       const id = a.id.toLowerCase();
       const kind = a.kind || (isImageMime(mime) ? 'image' : 'file');
-      this.assets.set(id, { ...a, id, kind, mime, name: a.name || withExt(id, mime), size: a.size || dataUrlSize(a.dataUrl), label: a.label || '' });
+      this.assets.set(id, { ...rest, id, kind, mime, name: a.name || withExt(id, mime), size: a.size || blob.size, blob, label: a.label || '' });
     }
     // Keep numbering past everything restored so old ids are never reused. (Base64 has no '_', so
     // image data can't produce false matches.)
@@ -597,13 +646,13 @@ export class Agent {
     scan(JSON.stringify(messages));
     for (const id of this.assets.keys()) scan(id);
     this.counters = max;
-    // Give attached images back to the model, as they were when the chat was saved.
+    // Give attached images back to the model, as they were when the chat was saved (by reference: see withImages).
     for (const m of messages) {
       if (m.role !== 'user' || typeof m.content !== 'string' || !Array.isArray(m._attachments)) continue;
       const urls = m._attachments
         .map((x) => this.assets.get(String(x?.id).toLowerCase()))
-        .filter((a) => a && /^image\/(png|jpeg|gif|webp)$/.test(a.mime) && a.size <= 4e6)
-        .map((a) => a.dataUrl);
+        .filter((a) => a && MODEL_IMAGE.test(a.mime) && a.size <= 4e6)
+        .map((a) => ASSET_IMAGE + a.id);
       if (urls.length) m.content = [{ type: 'text', text: m.content }, ...urls.map((url) => ({ type: 'image_url', image_url: { url } }))];
     }
     this.allowedTools.clear();

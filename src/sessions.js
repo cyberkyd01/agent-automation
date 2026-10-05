@@ -1,7 +1,9 @@
 // IndexedDB persistence for chat sessions and their assets (attached and generated files).
-// Three object stores: metadata (small, listed often), bodies (messages + queue) and assets (big data URLs),
-// so listing chats never loads message bodies. The goal is "no lost chats": writes are atomic and serialised
-// per chat, and every failure surfaces as an Error a person can read.
+// Three object stores: metadata (small, listed often), bodies (messages + queue) and assets (each holds its
+// file as a Blob, which Chrome keeps on disk), so listing chats never loads message bodies. The goal is
+// "no lost chats": writes are atomic and serialised per chat, and every failure surfaces as an Error a person can read.
+
+import { assetBlob, formatBytes, isBlob, readZip, toBlob, writeZip, MAX_ZIP_BYTES } from './files.js';
 
 const DB_NAME = 'agent-automation';
 const META = 'sessions';
@@ -10,7 +12,12 @@ const ASSET = 'assets';
 const BLOCKED_MS = 8000;
 
 const EXPORT_FORMAT = 'agent-automation-sessions';
-const EXPORT_VERSION = 1;
+// 1: one JSON file, assets inline as data URLs (still written when a chat has no files).
+// 2: a ZIP with manifest.json (assets point at their entry) and each file's bytes as its own entry.
+const EXPORT_VERSION = 2;
+const MANIFEST = 'manifest.json';
+const MAX_MANIFEST_BYTES = 256 * 1024 * 1024;
+const MAX_IMPORT_FILE_BYTES = 1024 * 1024 * 1024; // per file inside an archive; guards against inflate bombs
 const LEGACY_ID = 'legacy-chat-v1';
 
 // One entry per schema version; add a function here to evolve the database. Each runs once, in order,
@@ -275,30 +282,107 @@ const byNewest = (a, b) => b.updatedAt - a.updatedAt || b.createdAt - a.createdA
 const idNumber = (id) => Number(/(\d+)$/.exec(id)?.[1] ?? Infinity);
 const assetOrder = (a, b) => (a.createdAt || 0) - (b.createdAt || 0) || idNumber(a.id) - idNumber(b.id) || (a.id < b.id ? -1 : 1);
 
+// A stored record → an Asset. Records written before assets held Blobs carry a data URL instead: those are
+// converted here (and rewritten later, see getAssets). null for a record whose data is unusable.
 function toAsset(rec) {
-  const { sessionId, ...asset } = rec;
+  const { sessionId, dataUrl, ...asset } = rec;
+  if (isBlob(asset.blob)) return asset;
+  if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:')) return null;
+  try {
+    asset.blob = toBlob(dataUrl, asset.mime);
+  } catch {
+    return null;
+  }
+  asset.size = finite(asset.size) ?? asset.blob.size;
   return asset;
 }
 
+const isLegacy = (rec) => !isBlob(rec?.blob) && typeof rec?.dataUrl === 'string';
+
+// An Asset → what is stored: the Blob, never a data URL.
+function toRecord(sessionId, asset) {
+  const { dataUrl, sessionId: _, ...rest } = asset;
+  const blob = assetBlob(asset);
+  return { ...rest, blob, size: finite(asset.size) ?? blob.size, sessionId };
+}
+
 // Fill in anything an imported asset lacks, so the rest of the extension can rely on the full shape.
-function cleanAsset(a) {
-  if (!isObj(a) || typeof a.id !== 'string' || !a.id || typeof a.dataUrl !== 'string' || !a.dataUrl.startsWith('data:')) return null;
-  const header = a.dataUrl.slice(5, Math.max(5, a.dataUrl.indexOf(',')));
-  const mime = str(a.mime) || header.split(';')[0] || 'application/octet-stream';
-  const comma = a.dataUrl.indexOf(',');
-  const approx = comma >= 0 ? Math.floor(((a.dataUrl.length - comma - 1) * 3) / 4) : 0;
+function cleanAsset(a, blob) {
+  if (!isObj(a) || typeof a.id !== 'string' || !a.id || !isBlob(blob)) return null;
+  const { dataUrl, entry, sessionId, ...rest } = a;
+  const mime = str(a.mime) || str(blob.type).split(';')[0] || 'application/octet-stream';
   return {
-    ...a,
+    ...rest,
     id: a.id,
     kind: a.kind === 'image' || (a.kind !== 'file' && mime.startsWith('image/')) ? 'image' : 'file',
     name: str(a.name) || a.id,
     mime,
-    size: finite(a.size) ?? approx,
-    dataUrl: a.dataUrl,
+    size: blob.size,
+    blob,
     label: str(a.label) || 'attached',
     createdAt: finite(a.createdAt) ?? Date.now(),
   };
 }
+
+const ZIP_MAGIC = [0x50, 0x4b];
+
+// A ZIP export (by its first bytes, or by name for one too damaged to tell).
+export async function isZipFile(blob) {
+  if (!isBlob(blob)) return false;
+  if (/\.zip$/i.test(str(blob.name))) return true;
+  try {
+    const b = new Uint8Array(await blob.slice(0, 4).arrayBuffer());
+    return b[0] === ZIP_MAGIC[0] && b[1] === ZIP_MAGIC[1] && (b[2] === 3 || b[2] === 5) && (b[3] === 4 || b[3] === 6);
+  } catch {
+    return false;
+  }
+}
+
+function zipProblem(e) {
+  if (e?.userFacing) return e;
+  const file = e?.entry ? `"${e.entry.split('/').pop()}"` : 'a file';
+  switch (e?.code) {
+    case 'notzip':
+    case 'ole':
+      return readable('This file is not an Agent Automation export: it is not a valid ZIP archive (it may be incomplete or damaged).');
+    case 'zip64':
+      return readable('This ZIP archive uses ZIP64, which cannot be imported here. Import an export made by Agent Automation.');
+    case 'encrypted':
+      return readable('This ZIP archive is password-protected, so it cannot be imported.');
+    case 'method':
+      return readable('This ZIP archive uses a compression method that cannot be imported. Import an export made by Agent Automation.');
+    case 'crc':
+      return readable(`This export file is damaged: ${file} in it does not match its checksum.`);
+    case 'toolarge':
+      return readable(`This export file cannot be imported: ${file} in it is too large.`);
+    case 'corrupt':
+      return readable('This export file is damaged or incomplete.');
+    default:
+      if (e?.name === 'NotReadableError' || e?.name === 'NotFoundError') return readable('Could not read this file. It may have been moved or deleted — choose it again.');
+      return readable(`This export file could not be read (${e?.message || e}).`);
+  }
+}
+
+// The manifest of a ZIP export, plus the open archive for its files.
+async function openExportZip(blob) {
+  let zip;
+  let text;
+  try {
+    zip = await readZip(blob);
+    if (!zip.has(MANIFEST)) throw readable('This ZIP file is not an Agent Automation export: it has no manifest.json in it.');
+    text = await (await zip.blob(MANIFEST, { limit: MAX_MANIFEST_BYTES, verify: true })).text();
+  } catch (e) {
+    throw zipProblem(e);
+  }
+  try {
+    return { obj: JSON.parse(text), zip };
+  } catch {
+    throw readable('This export file is damaged: its manifest is not valid JSON.');
+  }
+}
+
+// 'report 2026.pdf' stays readable inside the archive; path separators and control characters do not survive.
+const entryName = (name) => str(name).replace(/[\\/\x00-\x1f:*?"<>|]+/g, '_').replace(/^\.+/, '_').slice(-120) || 'file';
 
 /* ---------- store ---------- */
 
@@ -376,23 +460,42 @@ export const store = {
     });
   },
 
+  // The asset's Blob is stored as is (Chrome writes it to disk); a data URL is never stored.
   putAsset(sessionId, asset) {
     if (typeof sessionId !== 'string' || !sessionId || !isObj(asset) || typeof asset.id !== 'string' || !asset.id) {
       return Promise.reject(readable('This file cannot be saved with the chat.'));
     }
-    const rec = { ...asset, sessionId };
+    let rec;
+    try {
+      rec = toRecord(sessionId, asset);
+    } catch {
+      return Promise.reject(readable('This file cannot be saved with the chat: its data is missing.'));
+    }
     return serial(sessionId, () => withTx([ASSET], 'readwrite', (t) => void t.objectStore(ASSET).put(rec))).catch((e) => {
       throw friendly(e, 'save the file');
     });
   },
 
   async getAssets(sessionId) {
+    let rows;
     try {
-      const rows = await withTx([ASSET], 'readonly', (t) => reqP(t.objectStore(ASSET).index('sessionId').getAll(IDBKeyRange.only(sessionId))));
-      return rows.map(toAsset).sort(assetOrder);
+      rows = await withTx([ASSET], 'readonly', (t) => reqP(t.objectStore(ASSET).index('sessionId').getAll(IDBKeyRange.only(sessionId))));
     } catch (e) {
       throw friendly(e, 'load the chat files');
     }
+    const assets = [];
+    const converted = [];
+    for (const rec of rows) {
+      const a = toAsset(rec);
+      if (!a) {
+        console.warn(`A saved file of this chat is damaged and was skipped: ${rec?.name || rec?.id}`);
+        continue;
+      }
+      if (isLegacy(rec)) converted.push(a);
+      assets.push(a);
+    }
+    if (converted.length) rewriteLegacy(sessionId, converted);
+    return assets.sort(assetOrder);
   },
 
   deleteAsset(sessionId, assetId) {
@@ -401,6 +504,7 @@ export const store = {
     });
   },
 
+  // → { blob, ext, title }: a .zip when the chat has files, plain .json (version 1) when it has none.
   async exportSession(id, { includeAssets = true } = {}) {
     try {
       const entry = await withTx([META, BODY, ASSET], 'readonly', async (t) => {
@@ -412,12 +516,13 @@ export const store = {
         if (!meta) throw gone();
         return exportEntry(meta, body, includeAssets ? assets : null);
       });
-      return envelope([entry]);
+      return await exportBlob([entry], { zip: !!entry.assets?.length });
     } catch (e) {
       throw friendly(e, 'export the chat');
     }
   },
 
+  // Every chat, always as a .zip.
   async exportAll({ includeAssets = true } = {}) {
     try {
       const entries = await withTx([META, BODY, ASSET], 'readonly', async (t) => {
@@ -437,14 +542,27 @@ export const store = {
           .sort(byNewest)
           .map((m) => exportEntry(m, bodyOf.get(m.id), includeAssets ? assetsOf.get(m.id) || [] : null));
       });
-      return envelope(entries);
+      return await exportBlob(entries, { zip: true });
     } catch (e) {
       throw friendly(e, 'export your chats');
     }
   },
 
-  // Accepts a parsed export (or its JSON text). Every chat gets a fresh id, so nothing is ever overwritten.
-  async importFile(obj) {
+  // Accepts an export file (a .zip or .json File/Blob), JSON text, or a parsed v1/v2 export.
+  // Every chat gets a fresh id, so nothing is ever overwritten.
+  async importFile(input) {
+    let obj = input;
+    let zip = null;
+    if (isBlob(input)) {
+      if (await isZipFile(input)) ({ obj, zip } = await openExportZip(input));
+      else {
+        try {
+          obj = await input.text();
+        } catch (e) {
+          throw zipProblem(e);
+        }
+      }
+    }
     if (typeof obj === 'string') {
       try {
         obj = JSON.parse(obj);
@@ -458,13 +576,32 @@ export const store = {
     if (version > EXPORT_VERSION) throw readable('This export was made by a newer version of Agent Automation. Update the extension, then try again.');
     if (!Array.isArray(obj.sessions)) throw readable('This export file is damaged: it has no chats in it.');
 
+    // Every file is read (and checked against its CRC) before anything is written, so a damaged archive
+    // imports nothing at all.
     const prepared = [];
     for (const s of obj.sessions) {
       if (!isObj(s)) continue;
       const messages = Array.isArray(s.messages) ? s.messages.filter(isMessage) : [];
       const assets = new Map();
       for (const a of Array.isArray(s.assets) ? s.assets : []) {
-        const clean = cleanAsset(a);
+        if (!isObj(a)) continue;
+        let blob = null;
+        if (typeof a.entry === 'string' && a.entry) {
+          if (!zip) throw readable('This export lists files that are not in it. Import the .zip file it came in instead.');
+          try {
+            blob = await zip.blob(a.entry, { type: str(a.mime), limit: MAX_IMPORT_FILE_BYTES, verify: true });
+          } catch (e) {
+            throw zipProblem(e);
+          }
+          if (!blob) throw readable(`This export file is damaged: "${str(a.name) || a.entry}" is missing from it.`);
+        } else if (typeof a.dataUrl === 'string' && a.dataUrl.startsWith('data:')) {
+          try {
+            blob = toBlob(a.dataUrl, a.mime);
+          } catch {
+            continue; // unreadable inline data: the chat imports without that file
+          }
+        }
+        const clean = cleanAsset(a, blob);
         if (clean) assets.set(clean.id, clean);
       }
       prepared.push({ s, messages, queue: cleanQueue(s.queue), assets: [...assets.values()] });
@@ -497,6 +634,34 @@ export const store = {
     }
   },
 
+  // A duplicate of a chat (messages, queue and files) under a new id, made inside the store: nothing is
+  // serialised, so it is quick even with big files. Resolves with the new id.
+  async copySession(id, { title } = {}) {
+    try {
+      return await withTx([META, BODY, ASSET], 'readwrite', async (t) => {
+        const metas = t.objectStore(META);
+        const [meta, body, rows] = await Promise.all([
+          reqP(metas.get(id)),
+          reqP(t.objectStore(BODY).get(id)),
+          reqP(t.objectStore(ASSET).index('sessionId').getAll(IDBKeyRange.only(id))),
+        ]);
+        if (!meta) throw gone();
+        const src = normMeta(meta);
+        const nid = uuid();
+        const messages = Array.isArray(body?.messages) ? body.messages : [];
+        metas.put(metaFor({ id: nid, title: cleanTitle(title) || `${src.title} (copy)`, url: src.url, pageTitle: src.pageTitle }, messages, src.createdAt, src.updatedAt));
+        t.objectStore(BODY).put({ id: nid, messages, queue: Array.isArray(body?.queue) ? body.queue : [] });
+        for (const rec of rows) {
+          const a = toAsset(rec);
+          if (a) t.objectStore(ASSET).put({ ...a, sessionId: nid });
+        }
+        return nid;
+      });
+    } catch (e) {
+      throw friendly(e, 'copy the chat');
+    }
+  },
+
   // v1.0 kept its single chat in chrome.storage.local under 'chat'. Move it into the new history once,
   // and only delete the old copy after the new one has been read back. Never rejects: on any problem the
   // old chat simply stays where it is and the move is tried again next time.
@@ -525,13 +690,55 @@ export const store = {
   },
 };
 
+// Records written before assets held Blobs are rewritten once with the Blob, in the background. Each one is
+// re-read first, so a file deleted in the meantime is not brought back.
+function rewriteLegacy(sessionId, assets) {
+  serial(sessionId, () =>
+    withTx([ASSET], 'readwrite', async (t) => {
+      const st = t.objectStore(ASSET);
+      for (const a of assets) {
+        const cur = await reqP(st.get([sessionId, a.id]));
+        if (isLegacy(cur)) st.put(toRecord(sessionId, a));
+      }
+    })
+  ).catch((e) => console.warn('Could not upgrade the saved files of a chat (they still work)', e));
+}
+
 function exportEntry(meta, body, assets) {
   const entry = { ...normMeta(meta), messages: Array.isArray(body?.messages) ? body.messages : [], queue: Array.isArray(body?.queue) ? body.queue : [] };
-  if (assets) entry.assets = assets.map(toAsset).sort(assetOrder);
+  if (assets) entry.assets = assets.map(toAsset).filter(Boolean).sort(assetOrder);
   return entry;
 }
 
-const envelope = (sessions) => ({ format: EXPORT_FORMAT, version: EXPORT_VERSION, exportedAt: Date.now(), sessions });
+// Export entries → { blob, ext, title }. With files: a ZIP holding manifest.json (assets point at their entry)
+// and each file's bytes, assembled from the stored Blobs (no file is turned into a string). Without: plain JSON.
+async function exportBlob(entries, { zip }) {
+  const exportedAt = Date.now();
+  const title = entries[0]?.title || 'chat';
+  if (!zip) {
+    const sessions = entries.map(({ assets, ...rest }) => rest);
+    const json = JSON.stringify({ format: EXPORT_FORMAT, version: 1, exportedAt, sessions });
+    return { blob: new Blob([json], { type: 'application/json' }), ext: 'json', title };
+  }
+  const files = [];
+  const sessions = entries.map((e, i) => {
+    if (!e.assets) return e;
+    const assets = e.assets.map(({ blob, dataUrl, ...a }) => {
+      const entry = `files/${i + 1}/${a.id}/${entryName(a.name || a.id)}`;
+      files.push({ name: entry, data: blob });
+      return { ...a, size: blob.size, entry };
+    });
+    return { ...e, assets };
+  });
+  const manifest = new Blob([JSON.stringify({ format: EXPORT_FORMAT, version: EXPORT_VERSION, exportedAt, sessions })], { type: 'application/json' });
+  const all = [{ name: MANIFEST, data: manifest }, ...files];
+  const total = all.reduce((n, f) => n + f.data.size + 76 + 2 * new TextEncoder().encode(f.name).length, 22);
+  if (total > MAX_ZIP_BYTES) {
+    throw readable(`This export would be ${formatBytes(total)} — more than the 4 GB one export file can hold. Export the chats one at a time instead.`);
+  }
+  if (all.length >= 0xffff) throw readable(`This export would hold ${files.length} files — more than one export file can hold. Export the chats one at a time instead.`);
+  return { blob: await writeZip(all, { date: new Date(exportedAt) }), ext: 'zip', title };
+}
 
 /* ---------- helpers for the panel ---------- */
 
