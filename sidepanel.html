@@ -6,6 +6,7 @@
   <meta name="color-scheme" content="light dark">
   <title>Agent Automation</title>
   <link rel="stylesheet" href="sidepanel.css">
+  <link rel="stylesheet" href="settings-tools.css">
   <script type="module" src="sidepanel.js"></script>
 </head>
 <body>
@@ -17,37 +18,70 @@
       <button id="reloadModels" class="icon" type="button" title="Reload models" aria-label="Reload models">
         <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg>
       </button>
-      <button id="newChat" class="icon" type="button" title="New chat" aria-label="New chat">
-        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="M12 7v6M9 10h6"/></svg>
+      <button id="openHistory" class="icon" type="button" title="History" aria-label="History: saved chats">
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/></svg>
       </button>
       <button id="openSettings" class="icon" type="button" title="Settings" aria-label="Settings">
         <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></svg>
       </button>
     </header>
 
+    <div class="tabstrip">
+      <div id="tabList" role="tablist" aria-label="Open chats" aria-orientation="horizontal"></div>
+      <button id="newTab" class="icon" type="button" title="New chat" aria-label="New chat">
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 5v14M5 12h14"/></svg>
+      </button>
+    </div>
+
     <div id="status" role="status" title="Click to dismiss" hidden></div>
 
-    <main id="chat" aria-label="Conversation"></main>
+    <div id="chats"></div>
 
     <footer id="composer">
-      <div id="attachments" class="thumbs attachments" aria-label="Attached images" hidden></div>
+      <div id="queueBar" class="queue" hidden>
+        <div class="queue-head">
+          <button id="queueToggle" class="queue-toggle" type="button" aria-expanded="false" aria-controls="queueBody">
+            <span id="queueSummary"></span>
+          </button>
+          <button id="queueRunNext" class="btn ghost" type="button" title="Run the next queued prompt" hidden>Run next</button>
+          <button id="queueRunAll" class="btn ghost" type="button" title="Run every queued prompt, one after another" hidden>Run all remaining</button>
+          <button id="queueResume" class="btn ghost" type="button" title="Continue with the next queued prompt" hidden>Resume</button>
+          <button id="queueClear" class="btn ghost" type="button" title="Remove every queued prompt" hidden>Clear</button>
+        </div>
+        <div id="queueBody" class="queue-body" hidden>
+          <label class="queue-mode">
+            <span>When a prompt finishes</span>
+            <select id="queueMode" aria-label="Queue mode">
+              <option value="auto">Run all</option>
+              <option value="step">One at a time</option>
+            </select>
+          </label>
+          <ol id="queueList" class="queue-list" aria-label="Queued prompts"></ol>
+        </div>
+      </div>
+      <div id="attachments" class="thumbs attachments" aria-label="Attached files" hidden></div>
       <div class="input-box">
-        <textarea id="input" rows="1" placeholder="Ask anything, or tell me what to do on this page…" aria-label="Message"></textarea>
+        <textarea id="input" rows="1" placeholder="Ask anything, or give me a task…" aria-label="Message"></textarea>
         <div class="composer-row">
           <select id="approval" aria-label="Approval mode" title="Approval mode">
             <option value="ask">Ask before acting</option>
             <option value="auto">Act without asking</option>
           </select>
-          <button id="attach" class="icon" type="button" title="Attach images" aria-label="Attach images">
-            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-5-5L5 21"/></svg>
+          <button id="attach" class="icon" type="button" title="Attach files" aria-label="Attach files">
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
           </button>
-          <input id="fileInput" type="file" accept="image/*" multiple hidden>
+          <input id="fileInput" type="file" multiple hidden>
+          <button id="batchOpen" class="icon" type="button" title="Batch: queue many jobs at once" aria-label="Batch jobs">
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 6h11M9 12h11M9 18h11"/><path d="M4 6h.01M4 12h.01M4 18h.01"/></svg>
+          </button>
           <div id="tab" class="tab"><img id="tabIcon" alt="" hidden><span id="tabTitle"></span></div>
+          <button id="stop" class="btn stop" type="button" title="Stop (Esc)" hidden>Stop</button>
           <button id="send" class="btn primary" type="button" title="Send (Enter)">Send</button>
         </div>
       </div>
     </footer>
   </div>
+  <div id="announce" class="sr-only" aria-live="polite"></div>
 
   <section id="settings" aria-label="Settings" hidden>
     <div class="settings-head">
@@ -57,6 +91,68 @@
       <h2>Settings</h2>
     </div>
     <div id="settingsBody"></div>
+  </section>
+
+  <section id="history" class="overlay" role="dialog" aria-modal="true" aria-labelledby="historyTitle" hidden>
+    <div class="settings-head">
+      <button id="closeHistory" class="icon" type="button" title="Back" aria-label="Back to chat">
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M15 18l-6-6 6-6"/></svg>
+      </button>
+      <h2 id="historyTitle">History</h2>
+      <div class="head-actions">
+        <button id="historyImport" class="btn" type="button" title="Import chats from .json export files">Import</button>
+        <button id="historyExportAll" class="btn" type="button" title="Download every saved chat, with its files, as one .json file">Export all</button>
+      </div>
+      <input id="importInput" type="file" accept=".json,application/json" multiple hidden>
+    </div>
+    <div class="hist-tools">
+      <input id="historySearch" type="search" placeholder="Search chats" aria-label="Search chats" spellcheck="false" autocomplete="off">
+      <label class="check-inline" title="Only chats started on the site in the active browser tab">
+        <input id="historyThisSite" type="checkbox">
+        <span>This site</span>
+      </label>
+    </div>
+    <div id="historyNotice" role="status" title="Click to dismiss" hidden></div>
+    <div id="historyBody">
+      <div id="historyList" role="list" aria-label="Saved chats"></div>
+      <div id="historyEmpty" class="hist-empty" hidden></div>
+      <button id="historyMore" class="btn hist-more-rows" type="button" hidden>Show more</button>
+    </div>
+  </section>
+
+  <section id="batch" class="overlay" role="dialog" aria-modal="true" aria-labelledby="batchTitle" hidden>
+    <div class="settings-head">
+      <button id="closeBatch" class="icon" type="button" title="Back" aria-label="Cancel batch">
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M15 18l-6-6 6-6"/></svg>
+      </button>
+      <h2 id="batchTitle">Batch jobs</h2>
+    </div>
+    <div id="batchBody">
+      <label class="field">
+        <span class="field-label">Items — one job per line</span>
+        <textarea id="batchItems" class="ctl" rows="7" placeholder="https://example.com/product/1&#10;https://example.com/product/2&#10;…" spellcheck="false"></textarea>
+      </label>
+      <label class="field">
+        <span class="field-label">Instruction (optional)</span>
+        <textarea id="batchTemplate" class="ctl" rows="3" placeholder="Open {{item}} and write a short summary of the product"></textarea>
+        <span class="hint"><code>{{item}}</code> is replaced by each line. Without it, each line is added after the instruction; with no instruction, each line is the whole prompt.</span>
+      </label>
+      <div class="field">
+        <span class="field-label">When a job finishes</span>
+        <div class="seg" role="radiogroup" aria-label="When a job finishes">
+          <label><input type="radio" name="batchMode" value="auto" checked><span>Run all</span></label>
+          <label><input type="radio" name="batchMode" value="step"><span>One at a time</span></label>
+        </div>
+      </div>
+      <div class="batch-preview" aria-live="polite">
+        <div id="batchCount" class="field-label">No jobs yet</div>
+        <pre id="batchPreview" hidden></pre>
+      </div>
+    </div>
+    <div class="batch-foot">
+      <button id="batchCancel" class="btn" type="button">Cancel</button>
+      <button id="batchAdd" class="btn primary" type="button" disabled>Add jobs to queue</button>
+    </div>
   </section>
 </body>
 </html>

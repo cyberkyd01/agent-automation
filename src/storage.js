@@ -30,12 +30,20 @@ export const DEFAULTS = {
   maxToolChars: 12000,
   trustedInput: false,
   customPrompt: '',
+  // Local program that gives the agent OS tools; approval: 'ask' (always confirm its tools) | 'follow' (use `approval`).
+  companion: { enabled: false, url: 'http://127.0.0.1:8765', token: '', approval: 'ask' },
+  queueMode: 'auto', // auto (run queued prompts back to back) | step (pause after each)
 };
 
 export async function loadSettings() {
   const { settings = {} } = await chrome.storage.local.get('settings');
   const base = structuredClone(DEFAULTS);
-  return { ...base, ...settings, image: { ...base.image, ...settings.image } };
+  return {
+    ...base,
+    ...settings,
+    image: { ...base.image, ...settings.image },
+    companion: { ...base.companion, ...settings.companion },
+  };
 }
 
 export async function saveSettings(s) {
@@ -59,10 +67,16 @@ export function syncOriginRules(s) {
 
 async function applyOriginRules(s) {
   const origins = new Map();
-  for (const u of [...s.providers.map((p) => p.baseUrl), ...s.mcpServers.map((m) => m.url)]) {
+  // [url, own]: the companion only accepts its own origin; other LAN servers (Ollama) expect a localhost one.
+  const urls = [
+    ...(s.providers || []).map((p) => [p.baseUrl, false]),
+    ...(s.mcpServers || []).map((m) => [m.url, false]),
+    [s.companion?.url, true],
+  ];
+  for (const [u, own] of urls) {
     try {
       const x = new URL(u);
-      if (isPrivate(x.hostname)) origins.set(x.origin, isLoopback(x.hostname) ? x.origin : 'http://localhost');
+      if (isPrivate(x.hostname)) origins.set(x.origin, own || isLoopback(x.hostname) ? x.origin : 'http://localhost');
     } catch {}
   }
   const addRules = [...origins].map(([origin, value], i) => ({

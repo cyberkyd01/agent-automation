@@ -10,7 +10,7 @@ if [ -z "$version" ]; then
   exit 1
 fi
 
-files=(manifest.json background.js sidepanel.html sidepanel.css sidepanel.js src icons LICENSE README.md)
+files=(manifest.json background.js sidepanel.html sidepanel.css settings-tools.css sidepanel.js src vendor icons LICENSE README.md)
 for f in "${files[@]}"; do
   if [ ! -e "$f" ]; then
     echo "Missing required file: $f" >&2

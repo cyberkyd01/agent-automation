@@ -1,0 +1,492 @@
+/* Styles for the "Computer tools" and "Remote MCP servers" Settings sections (src/settings-tools-ui.js).
+   Loaded after sidepanel.css: reuses its tokens and the .btn / .field / .card / .hint / .test-result classes,
+   and only adds what is new. */
+
+:root {
+  --warn: #8a5300;
+  --warn-bg: #fff6e3;
+  --warn-border: #f0d9a6;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --warn: #f0b955;
+    --warn-bg: rgba(240, 185, 85, 0.09);
+    --warn-border: rgba(240, 185, 85, 0.32);
+  }
+}
+
+/* ---------- inputs ---------- */
+
+input.mono {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+input[aria-invalid='true'],
+textarea.ctl[aria-invalid='true'] {
+  border-color: var(--err);
+}
+
+input[aria-invalid='true']:focus,
+textarea.ctl[aria-invalid='true']:focus {
+  border-color: var(--err);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--err) 18%, transparent);
+}
+
+.input-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.input-row > input {
+  flex: 1 1 0;
+  width: auto;
+}
+
+.field-error,
+.field-warn {
+  font-size: 11.5px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.field-error {
+  color: var(--err);
+}
+
+.field-warn {
+  color: var(--warn);
+}
+
+.hint.caution {
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--muted);
+}
+
+.hint.caution.warn {
+  border-color: var(--warn-border);
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+/* ---------- links and code ---------- */
+
+.tools-link {
+  color: var(--link);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--link) 40%, transparent);
+  text-underline-offset: 2px;
+}
+
+.tools-link:hover {
+  text-decoration-color: currentColor;
+}
+
+.tools-code,
+.codeblock-text {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.tools-code {
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--code-bg);
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+
+.codeblock {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+  margin-top: 6px;
+}
+
+.codeblock-text {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--code-bg);
+  color: var(--fg);
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.codeblock > .btn {
+  flex: none;
+  min-width: 56px;
+}
+
+/* ---------- set-up block ---------- */
+
+.tools-setup {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.tools-setup > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 4px 10px;
+  border-radius: 8px;
+  font-weight: 500;
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+
+.tools-setup > summary::-webkit-details-marker {
+  display: none;
+}
+
+.tools-setup > summary::before {
+  content: '';
+  flex: none;
+  width: 5px;
+  height: 5px;
+  margin: 0 2px 2px 3px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  color: var(--muted);
+  transform: rotate(-45deg);
+  transition: transform 0.15s;
+}
+
+.tools-setup[open] > summary::before {
+  margin-bottom: 4px;
+  transform: rotate(45deg);
+}
+
+.tools-setup > summary:hover {
+  background: var(--surface-2);
+}
+
+.tools-setup-body {
+  padding: 0 10px 10px;
+}
+
+.tools-steps {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.tools-steps > li {
+  margin: 0 0 8px;
+  padding-left: 2px;
+  overflow-wrap: anywhere;
+}
+
+.tools-steps > li:last-child {
+  margin-bottom: 0;
+}
+
+.tools-setup-extra {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.tools-setup-extra > .hint {
+  margin: 0;
+}
+
+/* ---------- actions and messages ---------- */
+
+.tools-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.set-section > .tools-actions,
+.set-section > .tools-manage,
+.set-section > .tools-setup {
+  margin-top: 10px;
+}
+
+.set-section > .tools-setup {
+  margin-top: 0;
+  margin-bottom: 10px;
+}
+
+.tools-result > * {
+  margin-top: 10px;
+}
+
+.tools-msg {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.tools-msg.ok {
+  border-color: color-mix(in srgb, var(--ok) 35%, transparent);
+  background: color-mix(in srgb, var(--ok) 8%, transparent);
+  color: var(--ok);
+}
+
+.tools-msg.error {
+  border-color: var(--err-border);
+  background: var(--err-bg);
+  color: var(--err);
+}
+
+.tools-msg.warn {
+  border-color: var(--warn-border);
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+.tools-msg-hint {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.tools-msg + .tools-msg {
+  margin-top: 6px;
+}
+
+.tools-status {
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--ok) 35%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--ok) 8%, transparent);
+}
+
+.tools-status-head {
+  color: var(--ok);
+  font-weight: 600;
+}
+
+.tools-grid {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px 10px;
+  margin: 6px 0 4px;
+  font-size: 12px;
+}
+
+.tools-grid dt {
+  color: var(--muted);
+}
+
+.tools-grid dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.tools-count {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+/* ---------- management area ---------- */
+
+.tools-manage {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.tools-manage-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.tools-sub {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.tools-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.tools-editor > .hint {
+  margin: -6px 0 0;
+}
+
+.tools-editor > .cards {
+  margin-bottom: 0;
+}
+
+.srv-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.srv-title {
+  flex: 1 1 80px;
+  min-width: 0;
+  font-family: var(--mono);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.badge {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 20px;
+  padding: 0 8px;
+  border-radius: 10px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.badge::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.badge.running {
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+  color: var(--ok);
+}
+
+.badge.starting {
+  background: var(--accent-soft);
+  color: var(--link);
+}
+
+.badge.starting::before {
+  animation: blink 1.2s ease-in-out infinite;
+}
+
+.badge.error {
+  background: var(--err-bg);
+  color: var(--err);
+}
+
+.badge.new {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+.badge.stopped,
+.badge.disabled,
+.badge.unknown {
+  color: var(--faint);
+}
+
+.srv-error {
+  max-height: 96px;
+  padding: 6px 8px;
+  overflow: auto;
+  border: 1px solid var(--err-border);
+  border-radius: 4px;
+  background: var(--err-bg);
+  color: var(--err);
+  font: 11.5px/1.45 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  scrollbar-width: thin;
+}
+
+.tools-paste {
+  background: var(--bg);
+}
+
+.tools-apply {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 0 4px;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+}
+
+/* Keyboard focus scrolls fields into view: keep them clear of the sticky bar above (which grows with its messages). */
+#settingsBody:has(#companionEditor:not([hidden])) {
+  scroll-padding-bottom: 168px;
+}
+
+.tools-dirty {
+  padding: 4px 8px;
+  border: 1px solid var(--warn-border);
+  border-radius: 6px;
+  background: var(--warn-bg);
+  color: var(--warn);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+/* ---------- remote MCP test result ---------- */
+
+.mcp-tools > summary {
+  min-height: 24px;
+  padding: 2px 0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.mcp-tool-list {
+  max-height: 180px;
+  margin: 4px 0 0;
+  padding: 6px 8px 6px 22px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  scrollbar-width: thin;
+}
+
+.mcp-tool-list > li {
+  margin: 0 0 3px;
+  overflow-wrap: anywhere;
+}
+
+.mcp-tool-name {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.mcp-tool-desc {
+  color: var(--muted);
+}

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Agent Automation",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Side-panel AI agent that automates your browser using a local model (LM Studio, Ollama) or any cloud API provider.",
   "homepage_url": "https://github.com/cyberkyd01/agent-automation",
   "minimum_chrome_version": "116",

@@ -444,7 +444,7 @@ export async function pageAct(a) {
         const dt = new DataTransfer();
         for (const f of a.files) {
           const { bytes, mime } = decode(f.dataUrl);
-          dt.items.add(new File([bytes], f.name, { type: mime }));
+          dt.items.add(new File([bytes], f.name, { type: f.mime || mime }));
         }
         input.files = dt.files;
         fire(input, 'input');

@@ -1,6 +1,7 @@
 import { DEFAULTS, PRESETS } from './storage.js';
 import { listModels, pickModel } from './providers.js';
 import { newId, repoLink } from './util.js';
+import { QUEUE_MODES, computerToolsSection, ensureToolSettings, mcpTestControls } from './settings-tools-ui.js';
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -133,6 +134,8 @@ function section(title, hint) {
 }
 
 export function renderSettings(container, settings, { save, onProvidersChanged }) {
+  // Settings saved by an older version lack the newer fields.
+  ensureToolSettings(settings, DEFAULTS);
   const commit = () => Promise.resolve().then(save).catch((e) => console.error('Saving settings failed', e));
   const headerChanged = () => onProvidersChanged?.();
 
@@ -164,6 +167,9 @@ export function renderSettings(container, settings, { save, onProvidersChanged }
       obj[key] = v;
       ctl.value = v === '' ? '' : String(v);
     });
+
+  // The new tool sections live in settings-tools-ui.js and build their controls with these same helpers.
+  const kit = { el, textInput, numberInput, textArea, selectBox, checkbox, button, removeButton, field, checkField, row, section, onChange, bindSelect, commit };
 
   /* ---------- providers ---------- */
 
@@ -316,7 +322,11 @@ export function renderSettings(container, settings, { save, onProvidersChanged }
     field('Size', imgSize, 'Optional. Leave blank for the model default.')
   );
 
-  /* ---------- MCP servers ---------- */
+  /* ---------- computer tools (local companion) ---------- */
+
+  const computer = computerToolsSection(settings, kit);
+
+  /* ---------- remote MCP servers ---------- */
 
   const mcpList = el('div', 'cards');
   const renderMcp = () => mcpList.replaceChildren(...settings.mcpServers.map(mcpCard));
@@ -340,13 +350,17 @@ export function renderSettings(container, settings, { save, onProvidersChanged }
       commit();
       addMcp.focus();
     });
+    // The fields save on change, which fires on blur just before this click, so `s` is current.
+    const test = mcpTestControls(kit, () => s);
     const actions = el('div', 'card-actions');
-    actions.append(checkField('Enabled', enabled), remove);
+    actions.append(checkField('Enabled', enabled), test.button, remove);
+    card.dataset.mcpCard = '';
     card.append(
       field('Name', name, 'Prefixes the tool names this server provides.'),
       field('URL', url),
       field('Headers', headers, 'One “Header: value” per line, e.g. Authorization: Bearer <token>.'),
-      actions
+      actions,
+      test.result
     );
     return card;
   }
@@ -360,13 +374,22 @@ export function renderSettings(container, settings, { save, onProvidersChanged }
   });
 
   renderMcp();
-  const mcp = section('MCP servers', 'Remote HTTP/SSE servers only; stdio servers need an HTTP bridge.');
+  const mcp = section(
+    'Remote MCP servers',
+    'Servers reached over HTTP or SSE. Local (stdio) servers are set up under Computer tools.'
+  );
+  mcp.id = 'remoteMcp';
   mcp.append(mcpList, addMcp);
 
   /* ---------- behaviour ---------- */
 
   const approval = selectBox([['ask', 'Ask before acting'], ['auto', 'Act without asking']], settings.approval);
   bindSelect(settings, 'approval', approval);
+
+  const queueMode = selectBox(QUEUE_MODES, settings.queueMode);
+  // Not 'queueMode': the queue bar's select already has that id, and a duplicate would steal this label.
+  queueMode.id = 'settingsQueueMode';
+  bindSelect(settings, 'queueMode', queueMode);
 
   const vision = selectBox([['auto', 'Auto-detect'], ['on', 'On'], ['off', 'Off']], settings.vision);
   bindSelect(settings, 'vision', vision);
@@ -407,6 +430,7 @@ export function renderSettings(container, settings, { save, onProvidersChanged }
   const behaviour = section('Behaviour');
   behaviour.append(
     field('Approval', approval, 'Ask pauses for your OK before actions that change pages or data.'),
+    field('Queue mode', queueMode, 'You can also switch this from the queue bar in a chat.'),
     row(
       field('Vision', vision, 'Send screenshots and images to the model.'),
       field('Max steps', maxSteps, 'Model turns per request.')
@@ -441,5 +465,5 @@ export function renderSettings(container, settings, { save, onProvidersChanged }
     about.append(links);
   }
 
-  container.replaceChildren(el('p', 'hint settings-note', 'Changes are saved automatically.'), providers, image, mcp, behaviour, about);
+  container.replaceChildren(el('p', 'hint settings-note', 'Changes are saved automatically.'), providers, image, computer, mcp, behaviour, about);
 }

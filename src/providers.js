@@ -21,11 +21,23 @@ async function doFetch(url, init, p) {
     res = await fetch(url, init);
   } catch (e) {
     if (e.name === 'AbortError') throw e;
-    throw new Error(`Cannot reach ${p.name} at ${p.baseUrl}. Is the server running and the URL correct? (${e.message})`);
+    const err = new Error(`Cannot reach ${p.name} at ${p.baseUrl}. Is the server running and the URL correct? (${e.message})`);
+    err.transient = true; // network failure: the agent may retry
+    throw err;
   }
   if (!res.ok) throw await httpError(res);
   return res;
 }
+
+// Errors reported inside a stream (after HTTP 200). Only server-side/overload codes get a status,
+// so the 4xx capability probing in chat() never reacts to them.
+function streamError(message, code) {
+  const e = new Error(message);
+  const n = Number(code);
+  if (n === 429 || n >= 500) e.status = n;
+  return e;
+}
+const ANTHROPIC_STREAM_CODES = { overloaded_error: 529, api_error: 500, rate_limit_error: 429 };
 
 export async function listModels(p, signal) {
   if (p.type === 'anthropic') {
@@ -267,7 +279,7 @@ async function openaiChat({ provider, model, messages, tools, settings, signal, 
       } catch {
         continue;
       }
-      if (j.error) throw new Error(j.error.message || JSON.stringify(j.error));
+      if (j.error) throw streamError(j.error.message || JSON.stringify(j.error), j.error.code ?? j.error.status);
       const d = j.choices?.[0]?.delta;
       if (!d) continue;
       if (typeof d.content === 'string') content += d.content;
@@ -341,7 +353,7 @@ async function anthropicChat({ provider, model, messages, tools, settings, signa
     } else if (j.type === 'message_delta') {
       stop = j.delta?.stop_reason || stop;
     } else if (j.type === 'error') {
-      throw new Error(j.error?.message || 'Stream error');
+      throw streamError(j.error?.message || 'Stream error', ANTHROPIC_STREAM_CODES[j.error?.type]);
     }
   }
   const tool_calls = blocks

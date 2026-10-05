@@ -1,5 +1,75 @@
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// sleep() that rejects with signal.reason as soon as the signal aborts.
+export function pause(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+/* ---------- data URLs and MIME types ---------- */
+
+// Image types a browser can display; any other MIME type makes an asset a plain file.
+export const isImageMime = (mime) => /^image\/(png|jpe?g|gif|webp|bmp|svg\+xml|avif)$/i.test(mime || '');
+
+export const mimeOf = (dataUrl) => (/^data:([^;,]+)/.exec(dataUrl || '')?.[1] || 'application/octet-stream').toLowerCase();
+
+// Decoded byte length, without decoding.
+export function dataUrlSize(dataUrl) {
+  const s = String(dataUrl || '');
+  const comma = s.indexOf(',');
+  if (comma < 0) return 0;
+  const body = s.slice(comma + 1);
+  if (!/;base64$/i.test(s.slice(0, comma))) return body.replace(/%[0-9a-f]{2}/gi, '_').length;
+  const pad = body.endsWith('==') ? 2 : body.endsWith('=') ? 1 : 0;
+  return Math.max(0, Math.floor((body.length * 3) / 4) - pad);
+}
+
+const EXTS = {
+  'image/jpeg': 'jpg',
+  'image/svg+xml': 'svg',
+  'image/x-icon': 'ico',
+  'image/vnd.microsoft.icon': 'ico',
+  'text/plain': 'txt',
+  'text/markdown': 'md',
+  'text/javascript': 'js',
+  'application/javascript': 'js',
+  'application/msword': 'doc',
+  'application/vnd.ms-excel': 'xls',
+  'application/vnd.ms-powerpoint': 'ppt',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'pptx',
+  'application/x-zip-compressed': 'zip',
+  'application/gzip': 'gz',
+  'application/x-gzip': 'gz',
+  'application/x-tar': 'tar',
+  'application/x-7z-compressed': '7z',
+  'text/tab-separated-values': 'tsv',
+  'text/x-python': 'py',
+  'audio/mpeg': 'mp3',
+  'video/quicktime': 'mov',
+};
+
+// '' when the type is unknown (application/octet-stream included).
+export function extFor(mime) {
+  const m = String(mime || '').toLowerCase();
+  if (m === 'application/octet-stream') return '';
+  return EXTS[m] || /^[a-z]+\/(?:x-)?([a-z0-9]{1,5})$/.exec(m)?.[1] || '';
+}
+
+// A default file name. Unknown types get no extension, so text sniffing still applies to them.
+export const withExt = (base, mime) => (extFor(mime) ? `${base}.${extFor(mime)}` : base);
+
 export const newId = () => crypto.randomUUID().replace(/-/g, '').slice(0, 10);
 
 export function safeParse(s, fallback = {}) {
