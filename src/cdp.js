@@ -1,26 +1,32 @@
 // Chrome DevTools Protocol helpers (via chrome.debugger). Used for trusted input events
 // and for running JavaScript on pages whose CSP blocks eval.
+import { api } from './host/api.js';
 
 const attached = new Set();
-chrome.debugger.onDetach.addListener((src) => attached.delete(src.tabId));
+api.events.on('debugger.detach', (src) => attached.delete(src?.tabId));
+
+// Firefox has no chrome.debugger, so nothing in this file can work there.
+export const hasDebugger = () => api.debugger.available !== false;
+export const NO_DEBUGGER = 'not available in Firefox (it needs Chrome’s debugger API)';
 
 export async function cdp(tabId, method, params = {}) {
+  if (!hasDebugger()) throw new Error(`Trusted input and debugger features are ${NO_DEBUGGER}.`);
   if (!attached.has(tabId)) {
     try {
-      await chrome.debugger.attach({ tabId }, '1.3');
+      await api.debugger.attach({ tabId }, '1.3');
     } catch (e) {
       throw new Error('Could not attach the debugger to this tab (close DevTools on it if open): ' + e.message);
     }
     attached.add(tabId);
   }
-  return chrome.debugger.sendCommand({ tabId }, method, params);
+  return api.debugger.sendCommand({ tabId }, method, params);
 }
 
 export async function detachAll() {
   for (const tabId of [...attached]) {
     attached.delete(tabId);
     try {
-      await chrome.debugger.detach({ tabId });
+      await api.debugger.detach({ tabId });
     } catch {}
   }
 }

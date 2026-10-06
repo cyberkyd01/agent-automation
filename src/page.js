@@ -589,3 +589,10 @@ export async function mainEval(code) {
     return { error: String((e && e.stack) || e) };
   }
 }
+
+// navigate back when chrome.tabs.goBack refuses (a tab whose first page nothing ever interacted with).
+export function pageBack() {
+  if (history.length <= 1) return false;
+  history.back();
+  return true;
+}

@@ -442,10 +442,6 @@ input[type='checkbox'] {
   animation: blink 1.6s ease-in-out infinite;
 }
 
-.ctab.readonly .ctab-title {
-  font-style: italic;
-}
-
 .ctab-x {
   position: relative;
   flex: none;

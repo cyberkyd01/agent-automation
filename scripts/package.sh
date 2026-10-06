@@ -1,27 +1,14 @@
 #!/usr/bin/env bash
-# Builds dist/agent-automation-v<version>.zip containing only the files the extension needs at runtime.
+# Builds every browser version (scripts/build.sh) and also writes the Chrome zip under its old name,
+# dist/agent-automation-v<version>.zip, which the install instructions and earlier releases use.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
+bash scripts/build.sh
+
 version=$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' manifest.json | head -n 1)
-if [ -z "$version" ]; then
-  echo "Could not read the version from manifest.json" >&2
-  exit 1
-fi
-
-files=(manifest.json background.js sidepanel.html sidepanel.css settings-tools.css sidepanel.js src vendor icons LICENSE README.md)
-for f in "${files[@]}"; do
-  if [ ! -e "$f" ]; then
-    echo "Missing required file: $f" >&2
-    exit 1
-  fi
-done
-
 out="dist/agent-automation-v${version}.zip"
-mkdir -p dist
-rm -f "$out"
+cp "dist/agent-automation-chrome-v${version}.zip" "$out"
 
-zip -r -q -X -D "$out" "${files[@]}" -x '*.DS_Store'
-
-echo "Wrote $(pwd)/$out ($(du -h "$out" | cut -f1 | tr -d '[:space:]'), $(wc -c < "$out" | tr -d '[:space:]') bytes)"
+echo "  $(pwd)/$out ($(du -h "$out" | cut -f1 | tr -d '[:space:]'), $(wc -c <"$out" | tr -d '[:space:]') bytes; the Chrome zip under its old name)"

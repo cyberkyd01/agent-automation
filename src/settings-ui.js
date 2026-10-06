@@ -1,7 +1,7 @@
 import { DEFAULTS, PRESETS } from './storage.js';
 import { listModels, pickModel } from './providers.js';
 import { newId, repoLink } from './util.js';
-import { QUEUE_MODES, computerToolsSection, ensureToolSettings, mcpTestControls } from './settings-tools-ui.js';
+import { QUEUE_MODES, computerToolsSection, ensureToolSettings, mcpTestControls, providerCodeControls, remoteAccessSection } from './settings-tools-ui.js';
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -137,7 +137,12 @@ export function renderSettings(container, settings, { save, onProvidersChanged }
   // Settings saved by an older version lack the newer fields.
   ensureToolSettings(settings, DEFAULTS);
   const commit = () => Promise.resolve().then(save).catch((e) => console.error('Saving settings failed', e));
-  const headerChanged = () => onProvidersChanged?.();
+  // Remote access lists the providers that sit on this network, so it follows every provider edit.
+  let remote = null;
+  const headerChanged = () => {
+    onProvidersChanged?.();
+    remote?.refreshProviders();
+  };
 
   const onChange = (ctl, fn) =>
     ctl.addEventListener('change', () => {
@@ -289,9 +294,23 @@ export function renderSettings(container, settings, { save, onProvidersChanged }
     card?.scrollIntoView({ block: 'nearest' });
   });
 
+  // Providers made from a connection code (Settings → Remote access in another browser) also add Remote MCP servers.
+  const fromCode = providerCodeControls(settings, kit, {
+    onAdded: () => {
+      if (!settings.providers.some((x) => x.id === settings.activeProviderId)) settings.activeProviderId = settings.providers[0]?.id || '';
+      renderProviders();
+      refreshImageProviders();
+      renderMcp();
+      headerChanged();
+      commit();
+    },
+  });
+  const addRow = el('div', 'provider-add');
+  addRow.append(addProvider, fromCode.button);
+
   renderProviders();
   const providers = section('Providers', 'Model servers and APIs. Pick the active one and its model in the header.');
-  providers.append(providerList, addProvider);
+  providers.append(providerList, addRow, fromCode.form);
 
   /* ---------- image generation ---------- */
 
@@ -324,7 +343,9 @@ export function renderSettings(container, settings, { save, onProvidersChanged }
 
   /* ---------- computer tools (local companion) ---------- */
 
-  const computer = computerToolsSection(settings, kit);
+  // Remote access needs the companion's /status and /config, which this section loads.
+  remote = remoteAccessSection(settings, kit);
+  const computer = computerToolsSection(settings, kit, remote.hooks);
 
   /* ---------- remote MCP servers ---------- */
 
@@ -404,8 +425,20 @@ export function renderSettings(container, settings, { save, onProvidersChanged }
   );
   bindSelect(settings, 'toolMode', toolMode);
 
-  const maxSteps = numberInput(settings.maxSteps, { min: 1, placeholder: String(DEFAULTS.maxSteps) });
-  bindNumber(settings, 'maxSteps', maxSteps, { min: 1, max: 1000 });
+  // 0 = no limit. Blank and negative values mean 0 too.
+  const maxSteps = numberInput(settings.maxSteps, { min: 0, placeholder: '0' });
+  maxSteps.id = 'maxSteps';
+  onChange(maxSteps, () => {
+    const v = Number(maxSteps.value.trim());
+    settings.maxSteps = Number.isFinite(v) ? Math.max(0, Math.round(v)) : 0;
+    maxSteps.value = String(settings.maxSteps);
+  });
+
+  const notifications = checkbox(settings.notifications);
+  notifications.id = 'notifications';
+  onChange(notifications, () => {
+    settings.notifications = notifications.checked;
+  });
 
   const maxTokens = numberInput(settings.maxTokens, { min: 1, placeholder: 'Provider default' });
   bindNumber(settings, 'maxTokens', maxTokens, { blank: true, min: 1 });
@@ -431,10 +464,8 @@ export function renderSettings(container, settings, { save, onProvidersChanged }
   behaviour.append(
     field('Approval', approval, 'Ask pauses for your OK before actions that change pages or data.'),
     field('Queue mode', queueMode, 'You can also switch this from the queue bar in a chat.'),
-    row(
-      field('Vision', vision, 'Send screenshots and images to the model.'),
-      field('Max steps', maxSteps, 'Model turns per request.')
-    ),
+    field('Vision', vision, 'Send screenshots and images to the model.'),
+    field('Max steps per prompt', maxSteps, '0 = no limit.'),
     field('Tool calling', toolMode, 'Prompted describes tools in the system prompt instead of using the API’s tool calling.'),
     row(
       field('Max output tokens', maxTokens, 'Blank = provider default.'),
@@ -449,6 +480,7 @@ export function renderSettings(container, settings, { save, onProvidersChanged }
       trusted,
       'Uses Chrome’s debugger for real mouse/keyboard events on sites that ignore synthetic ones. Chrome shows a debugging banner while active.'
     ),
+    checkField('Desktop notifications', notifications, 'Approvals and finished jobs while the panel is closed.'),
     field('Custom instructions', customPrompt, 'Added to the system prompt on every request.')
   );
 
@@ -466,5 +498,5 @@ export function renderSettings(container, settings, { save, onProvidersChanged }
     about.append(links);
   }
 
-  container.replaceChildren(el('p', 'hint settings-note', 'Changes are saved automatically.'), providers, image, computer, mcp, behaviour, about);
+  container.replaceChildren(el('p', 'hint settings-note', 'Changes are saved automatically.'), providers, image, computer, remote.root, mcp, behaviour, about);
 }

@@ -1,22 +1,25 @@
-import { Agent } from './src/agent.js';
-import { assetBlob, formatBytes } from './src/files.js';
+// The side panel is a view: every chat, its agent, queue and saving live in the engine (src/engine/engine.js,
+// in Chrome's offscreen document), which keeps working when the panel is closed. The panel connects to it over
+// the 'panel' port (src/engine/PROTOCOL.md), renders what it is told and sends commands.
+import { fileToAssetData, formatBytes, toBlob } from './src/files.js';
 import { md, stripToolCalls } from './src/markdown.js';
 import { listModels, pickModel } from './src/providers.js';
-import { isZipFile, newSession, sessionToMarkdown, store, titleFrom } from './src/sessions.js';
+import { isZipFile, sessionToMarkdown, store, titleFrom } from './src/sessions.js';
 import { renderSettings } from './src/settings-ui.js';
 import { loadSettings, saveSettings, syncOriginRules } from './src/storage.js';
 import { newId, repoLink, safeParse, sleep, splitThink } from './src/util.js';
 
 const CUSTOM_MODEL = '__custom__';
 const TOOL_TEXT_LIMIT = 4000;
-const SAVE_DELAY = 300;
 const CONFIRM_MS = 5000;
 const STORE_TIMEOUT = 10000; // a storage call slower than this is reported, never waited on forever
+const DRAFT_DELAY = 300;
 const HISTORY_PAGE = 60;
 const DEFAULT_TITLE = 'New chat';
-const LOCK_PREFIX = 'agent-automation-session:';
 const PLACEHOLDER = 'Ask anything, or give me a task…';
 const MODE_LABEL = { auto: 'Run all', step: 'One at a time' };
+const PORT_NAME = 'panel';
+const TO_HOST = 'aa-host';
 const SUGGESTIONS = [
   'Summarise this page',
   'Find unanswered customer enquiries on this page and draft replies',
@@ -84,15 +87,14 @@ const batchAddBtn = $('batchAdd');
 const batchModeInputs = [...document.querySelectorAll('input[name="batchMode"]')];
 
 let settings = null;
-let lastApproval = null;
 let windowId = null;
 let statusSeq = 0;
 let currentTab = null; // the active browser tab, for session meta and the "This site" filter
 let active = null; // the chat session shown in the panel
-let panelTimer = 0;
 let queueClearArmed = null;
 let batchTarget = null;
-const sessions = new Map(); // id → session, in tab order
+let closeFocus = null; // where focus goes when the active chat-tab closes
+const sessions = new Map(); // id → session view, in tab order
 const loadingModels = new Set();
 const chatOwner = new WeakMap();
 const resizer = new ResizeObserver((entries) => {
@@ -215,6 +217,173 @@ function flashStatus(text, ms = 4000) {
   setTimeout(() => clearStatus(seq), ms);
 }
 
+/* ---------- the engine connection ---------- */
+
+const engine = { port: null, connected: false, seq: 0, calls: new Map(), firstSnapshot: true, statusSeq: 0, connecting: null };
+
+// Sends a command. With { reply: false } nothing is awaited; otherwise resolves with the engine's answer.
+function cmd(t, args = {}, { reply = true } = {}) {
+  const port = engine.connected ? engine.port : null;
+  if (!port) return reply ? Promise.reject(new Error('The agent is not connected yet — try again in a moment.')) : Promise.resolve();
+  const msg = { t, ...args };
+  let p = Promise.resolve();
+  if (reply) {
+    msg.rid = ++engine.seq;
+    p = new Promise((resolve, reject) => engine.calls.set(msg.rid, { resolve, reject }));
+  }
+  try {
+    port.postMessage(msg);
+  } catch (e) {
+    if (reply) engine.calls.delete(msg.rid);
+    return reply ? Promise.reject(new Error('The connection to the agent was lost.')) : Promise.resolve();
+  }
+  return p;
+}
+
+const tell = (t, args) => void cmd(t, args, { reply: false });
+
+function connectEngine() {
+  engine.connecting ??= (async () => {
+    for (let attempt = 0; ; attempt++) {
+      // Chrome: the service worker starts the offscreen document. Elsewhere nobody answers, which is fine.
+      let problem = '';
+      try {
+        const r = await chrome.runtime.sendMessage({ to: TO_HOST, op: 'ensureEngine' });
+        if (r && !r.ok) problem = r.error?.message || 'unknown error';
+      } catch {}
+      if (await openPort()) break;
+      if (attempt >= 2) engine.statusSeq = setStatus(problem ? `Could not start the agent (${problem}). Retrying…` : 'Connecting to the agent…', problem ? 'error' : 'info');
+      await sleep(Math.min(2000, 150 * (attempt + 1)));
+    }
+  })().finally(() => (engine.connecting = null));
+  return engine.connecting;
+}
+
+function openPort() {
+  return new Promise((resolve) => {
+    let port;
+    try {
+      port = chrome.runtime.connect({ name: PORT_NAME });
+    } catch {
+      return resolve(false);
+    }
+    let up = false;
+    port.onMessage.addListener((m) => {
+      if (!up && m?.t === 'snapshot') {
+        up = true;
+        engine.port = port;
+        engine.connected = true;
+        resolve(true);
+      }
+      if (up) onEngineMessage(m);
+    });
+    port.onDisconnect.addListener(() => {
+      void chrome.runtime.lastError;
+      if (!up) return resolve(false);
+      if (engine.port === port) onDisconnected();
+    });
+    try {
+      port.postMessage({ t: 'hello', windowId });
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+function onDisconnected() {
+  engine.port = null;
+  engine.connected = false;
+  for (const { reject } of engine.calls.values()) reject(new Error('The connection to the agent was lost.'));
+  engine.calls.clear();
+  updateComposer();
+  engine.statusSeq = setStatus('Reconnecting to the agent…');
+  connectEngine();
+}
+
+function onEngineMessage(m) {
+  switch (m?.t) {
+    case 'reply': {
+      const c = engine.calls.get(m.rid);
+      if (!c) return;
+      engine.calls.delete(m.rid);
+      if (m.ok) c.resolve(m.value);
+      else c.reject(new Error(m.error || 'Unknown error'));
+      return;
+    }
+    case 'snapshot':
+      return onSnapshot(m);
+    case 'sessions':
+      return syncSessions(m.sessions, m.activeId);
+    case 'state': {
+      const s = sessions.get(m.s?.id);
+      if (s) applyState(s, m.s);
+      return;
+    }
+    case 'items': {
+      const s = sessions.get(m.sid);
+      if (s) renderItems(s, m.items, m.assets);
+      return;
+    }
+    case 'item': {
+      const s = sessions.get(m.sid);
+      if (s?.ready) upsertItem(s, m.item);
+      return;
+    }
+    case 'itemRemoved': {
+      const s = sessions.get(m.sid);
+      const rec = s?.nodes.get(m.id);
+      if (rec) {
+        rec.node?.remove();
+        s.nodes.delete(m.id);
+      }
+      return;
+    }
+    case 'asset': {
+      const s = sessions.get(m.sid);
+      if (s && m.asset?.id) s.assets.set(m.asset.id, m.asset);
+      return;
+    }
+    case 'assetRemoved': {
+      const s = sessions.get(m.sid);
+      if (s) s.assets.delete(m.id);
+      return;
+    }
+    case 'status':
+      return setStatus(m.text, m.kind);
+    case 'draftBack': {
+      const s = sessions.get(m.sid);
+      if (s) returnToComposer(s, m.text, m.ids);
+      return;
+    }
+    case 'focus': {
+      const s = sessions.get(m.sid);
+      if (s) activate(s, { focus: 'none' });
+      return;
+    }
+  }
+}
+
+function onSnapshot(m) {
+  clearStatus(engine.statusSeq);
+  syncSessions(m.sessions || [], m.activeId, { snapshot: true });
+  for (const [id, d] of Object.entries(m.drafts || {})) {
+    const s = sessions.get(id);
+    if (!s || (s === active ? input.value : s.draft) || s.pending.length) continue;
+    s.draft = String(d?.text || '');
+    s.pending = Array.isArray(d?.pending) ? d.pending.map(String) : [];
+    if (s === active) {
+      input.value = s.draft;
+      autosize();
+      renderChips();
+    }
+  }
+  const first = engine.firstSnapshot;
+  engine.firstSnapshot = false;
+  const want = (active && sessions.get(active.id)) || sessions.get(m.activeId) || [...sessions.values()].at(-1);
+  if (want) activate(want, { focus: first ? 'input' : 'none', force: true });
+  updateComposer();
+}
+
 /* ---------- scrolling ---------- */
 
 const nearBottom = (c) => c.scrollHeight - c.scrollTop - c.clientHeight < 60;
@@ -249,11 +418,12 @@ function showEmpty(s) {
   for (const text of SUGGESTIONS) {
     list.append(
       button('suggestion', text, () => {
-        if (s !== active || s.readOnly) return;
+        if (s !== active) return;
         input.value = text;
         autosize();
         updateComposer();
         input.focus();
+        syncDraft(s);
       })
     );
   }
@@ -261,6 +431,10 @@ function showEmpty(s) {
   const rate = repoLink('empty-link', '★ Rate on GitHub');
   if (rate) wrap.append(rate);
   s.chat.replaceChildren(wrap);
+}
+
+function showLoading(s) {
+  s.chat.replaceChildren(el('div', 'pane-loading', 'Loading chat…'));
 }
 
 function thumb(src, { onRemove, label, s } = {}) {
@@ -291,29 +465,11 @@ function thumbs(list, s) {
   return r;
 }
 
-// An object URL for an asset's Blob (thumbnails, Download links): one per Blob per chat, revoked when the
-// asset is discarded, the transcript is re-rendered or the chat closes. v1.0 inline images keep their data URL.
+// The engine hands over an object URL for each asset's Blob (thumbnails, Download links); v1.0 inline images
+// keep their data URL.
 function urlFor(s, a) {
   if (typeof a?.src === 'string') return a.src;
-  let blob;
-  try {
-    blob = assetBlob(a);
-  } catch {
-    return '';
-  }
-  let url = s.urls.get(blob);
-  if (!url) s.urls.set(blob, (url = URL.createObjectURL(blob)));
-  return url;
-}
-
-function revokeUrls(s, a) {
-  const one = a && assetBlobOrNull(a);
-  const urls = a ? [[one, s.urls.get(one)]] : [...s.urls];
-  for (const [blob, url] of urls) {
-    if (!url) continue;
-    URL.revokeObjectURL(url);
-    s.urls.delete(blob);
-  }
+  return s.assets.get(String(a?.id ?? '').toLowerCase())?.url || '';
 }
 
 // One attachment: a thumbnail for images we have bytes for, otherwise a type badge + name + size.
@@ -374,9 +530,6 @@ function workingDots() {
   return w;
 }
 
-const textOf = (c) =>
-  typeof c === 'string' ? c : Array.isArray(c) ? c.filter((p) => p?.type === 'text').map((p) => p.text).join('\n') : '';
-
 function addCopyButtons(root) {
   for (const pre of root.querySelectorAll('pre')) {
     const wrap = el('div', 'code');
@@ -432,32 +585,26 @@ function assistantView(s) {
     return Boolean(t || reasoning);
   };
 
-  // Renders synchronously: requestAnimationFrame doesn't fire while the panel is hidden.
-  const end = (msg) => {
-    if (finished) return;
-    finished = true;
-    s.live.delete(view);
-    if (raf) cancelAnimationFrame(raf);
-    if (msg) latest = { content: textOf(msg.content), reasoning: msg._reasoning || latest.reasoning };
-    const any = render();
-    dots.remove();
-    think.classList.remove('live');
-    if (!any) wrap.remove();
-    else addCopyButtons(body);
-  };
-
-  const view = {
-    update({ content, reasoning } = {}) {
+  return {
+    node: wrap,
+    apply(item) {
       if (finished) return;
-      latest = { content: content || '', reasoning: reasoning || '' };
-      markUnread(s);
-      if (!raf) raf = requestAnimationFrame(render);
+      latest = { content: item.content || '', reasoning: item.reasoning || '' };
+      if (!item.done) {
+        markUnread(s);
+        if (!raf) raf = requestAnimationFrame(render);
+        return;
+      }
+      // Renders synchronously: requestAnimationFrame doesn't fire while the panel is hidden.
+      finished = true;
+      if (raf) cancelAnimationFrame(raf);
+      const any = render();
+      dots.remove();
+      think.classList.remove('live');
+      if (!any) wrap.remove();
+      else addCopyButtons(body);
     },
-    done: (msg) => end(msg),
-    settle: () => end(),
   };
-  s.live.add(view);
-  return view;
 }
 
 const ARG_FIRST = { type: 0, action: 0, url: 1, id: 2 };
@@ -481,7 +628,8 @@ function argSummary(args) {
 const pretty = (v) => (typeof v === 'string' ? v : JSON.stringify(v, null, 2) ?? '');
 const capText = (t) => (t.length > TOOL_TEXT_LIMIT ? `${t.slice(0, TOOL_TEXT_LIMIT)}\n… (${t.length - TOOL_TEXT_LIMIT} more characters)` : t);
 
-function toolCard(s, name, args) {
+function toolCard(s, item) {
+  const args = item.args;
   const parsed = typeof args === 'string' ? safeParse(args, null) ?? args : args;
   const wrap = el('div', 'tool running');
   const det = el('details');
@@ -489,7 +637,7 @@ function toolCard(s, name, args) {
   const icon = el('span', 'tool-icon');
   icon.setAttribute('role', 'img');
   icon.setAttribute('aria-label', 'Running');
-  sum.append(icon, el('span', 'tool-name', name || 'tool'));
+  sum.append(icon, el('span', 'tool-name', item.name || 'tool'));
   const summary = argSummary(parsed);
   if (summary) sum.append(el('span', 'tool-arg', summary));
   const body = el('div', 'tool-body');
@@ -506,102 +654,92 @@ function toolCard(s, name, args) {
     icon.textContent = glyph;
     icon.setAttribute('aria-label', label);
   };
-
-  const card = {
-    ask(signal, info = {}) {
-      return new Promise((resolve, reject) => {
-        if (signal?.aborted) return reject(signal.reason);
-        det.open = true;
-        wrap.classList.add('asking');
-        const sensitive = Boolean(info?.sensitive);
-        const bar = el('div', 'ask');
-        askBar = bar;
-        s.asking++;
-        markUnread(s);
-        renderTab(s);
-        const close = () => {
-          if (!askBar) return;
-          bar.remove();
-          askBar = null;
-          wrap.classList.remove('asking');
-          signal?.removeEventListener('abort', onAbort);
-          s.asking = Math.max(0, s.asking - 1);
-          renderTab(s);
-        };
-        const onAbort = () => {
-          close();
-          reject(signal.reason);
-        };
-        const choice = (label, value, cls) =>
-          button(`btn ${cls}`.trim(), label, () => {
-            close();
-            resolve(value);
-          });
-        bar.append(el('span', 'ask-q', 'Allow this action?'));
-        if (sensitive) bar.append(el('span', 'ask-warn', 'Caution: this tool acts on your computer, outside the browser.'));
-        bar.append(
-          choice('Allow', 'allow', 'primary'),
-          choice(sensitive ? 'Always allow this tool (this chat)' : 'Allow all (this chat)', 'always', ''),
-          choice('Deny', 'deny', 'danger')
-        );
-        signal?.addEventListener('abort', onAbort, { once: true });
-        wrap.append(bar);
-        card.closeAsk = close;
-        // Approval needs attention even if the user scrolled up.
-        if (s === active) bar.scrollIntoView({ block: 'nearest' });
-        follow(s);
+  const closeAsk = () => {
+    if (!askBar) return;
+    askBar.remove();
+    askBar = null;
+    wrap.classList.remove('asking');
+  };
+  const showAsk = (ask) => {
+    det.open = true;
+    wrap.classList.add('asking');
+    const sensitive = Boolean(ask?.sensitive);
+    const bar = el('div', 'ask');
+    askBar = bar;
+    markUnread(s);
+    const choice = (label, value, cls) =>
+      button(`btn ${cls}`.trim(), label, () => {
+        closeAsk();
+        cmd('approve', { id: s.id, itemId: item.id, answer: value }).catch((e) => setStatus(errText(e), 'error'));
       });
-    },
-    finish(text, isError, images) {
+    bar.append(el('span', 'ask-q', 'Allow this action?'));
+    if (sensitive) bar.append(el('span', 'ask-warn', 'Caution: this tool acts on your computer, outside the browser.'));
+    bar.append(
+      choice('Allow', 'allow', 'primary'),
+      choice(sensitive ? 'Always allow this tool (this chat)' : 'Allow all (this chat)', 'always', ''),
+      choice('Deny', 'deny', 'danger')
+    );
+    wrap.append(bar);
+    // Approval needs attention even if the user scrolled up.
+    if (s === active) bar.scrollIntoView({ block: 'nearest' });
+    follow(s);
+  };
+
+  const view = {
+    node: wrap,
+    apply(it) {
       if (finished) return;
+      if (it.state === 'running') {
+        if (it.ask && !askBar) showAsk(it.ask);
+        else if (!it.ask && askBar) closeAsk();
+        return;
+      }
       finished = true;
-      s.live.delete(card);
-      card.closeAsk?.();
+      closeAsk();
+      if (it.state === 'stopped') return setState('stopped', 'Stopped', '–');
+      const isError = it.state === 'error';
       setState(isError ? 'error' : 'ok', isError ? 'Failed' : 'Done', isError ? '✕' : '✓');
-      const out = text == null ? '' : typeof text === 'string' ? text : pretty(text);
+      const out = it.result == null ? '' : typeof it.result === 'string' ? it.result : pretty(it.result);
       body.append(el('div', 'tool-label', isError ? 'Error' : 'Result'), el('pre', `tool-pre${isError ? ' err' : ''}`, capText(out || '(no output)')));
       if (isError && out) sum.title = clip(out.replace(/\s+/g, ' '), 200);
-      if (images?.length) body.append(thumbs(images, s));
+      if (it.images?.length) body.append(thumbs(it.images, s));
       markUnread(s);
       follow(s);
     },
-    settle() {
-      if (finished) return;
-      finished = true;
-      s.live.delete(card);
-      card.closeAsk?.();
-      setState('stopped', 'Stopped', '–');
-    },
   };
-  s.live.add(card);
-  return card;
+  view.apply(item);
+  return view;
 }
 
-// actions: [{ label, run, id? }] — rendered as small buttons; they are removed when the next job starts.
-function notice(s, text, kind = 'info', actions = []) {
-  const n = el('div', `notice ${kind === 'error' ? 'error' : 'info'}`);
-  n.append(el('span', 'notice-text', String(text ?? '')));
-  if (kind === 'error') n.setAttribute('role', 'alert');
-  if (actions.length) {
-    const box = el('span', 'notice-actions');
-    for (const a of actions) {
+// item.actions: [{ label, id }] — small buttons; the engine removes them when the next job starts.
+function noticeView(s, item) {
+  const n = el('div', `notice ${item.kind === 'error' ? 'error' : 'info'}`);
+  n.append(el('span', 'notice-text', String(item.text ?? '')));
+  if (item.kind === 'error') n.setAttribute('role', 'alert');
+  let box = null;
+  if (item.actions?.length) {
+    box = el('span', 'notice-actions');
+    for (const a of item.actions) {
       const b = button('btn', a.label, () => {
-        box.remove();
-        s.noticeActions.delete(box);
-        a.run();
+        box?.remove();
+        box = null;
+        cmd('noticeAction', { id: s.id, itemId: item.id, action: a.id, page: pageInfo() }).catch((e) => setStatus(errText(e), 'error'));
       });
       if (a.id) b.dataset.action = a.id;
       box.append(b);
     }
     n.append(box);
-    s.noticeActions.add(box);
   }
-  return add(s, n);
-}
-
-function clearNoticeActions(s) {
-  for (const box of s.noticeActions) box.remove();
-  s.noticeActions.clear();
+  add(s, n);
+  return {
+    node: n,
+    apply(it) {
+      if (!it.actions?.length && box) {
+        box.remove();
+        box = null;
+      }
+    },
+  };
 }
 
 function fileName(id, mime) {
@@ -611,7 +749,7 @@ function fileName(id, mime) {
 
 function assetCard(s, a) {
   const url = a ? urlFor(s, a) : '';
-  if (!url) return;
+  if (!url) return null;
   const { id, label } = a;
   const isImage = a.kind ? a.kind === 'image' : /^image\//i.test(a.mime || '');
   const card = el('div', isImage ? 'asset' : 'asset file');
@@ -652,167 +790,153 @@ function assetCard(s, a) {
   const foot = el('div', 'asset-foot');
   foot.append(meta, dl, attach);
   card.append(foot);
-  add(s, card);
+  return add(s, card);
 }
 
-function settleLive(s) {
-  for (const v of [...s.live]) v.settle();
-  s.live.clear();
-}
+/* ---------- transcript items (built by the engine) ---------- */
 
-/* ---------- transcript restore ---------- */
-
-function userText(m) {
-  if (typeof m._text === 'string') return m._text;
-  let raw = textOf(m.content);
-  const i = raw.lastIndexOf('<context>');
-  if (i >= 0 && /<\/context>\s*$/.test(raw)) raw = raw.slice(0, i);
-  return raw.trim();
-}
-
-function attachmentInfo(s, ref) {
-  const a = s.agent.assets.get(String(ref.id ?? ref).toLowerCase());
-  if (typeof ref === 'string') return a ? { ...a } : { id: ref, kind: 'file', name: ref };
-  return { ...ref, blob: a ? assetBlobOrNull(a) : null, name: ref.name || a?.name };
-}
-
-function userAttachments(s, m) {
-  if (Array.isArray(m._attachments)) return m._attachments.filter((x) => x && x.id).map((x) => attachmentInfo(s, x));
-  // v1.0 history kept image data inline.
-  const legacy = Array.isArray(m._images)
-    ? m._images
-    : Array.isArray(m.content)
-      ? m.content.filter((p) => p?.type === 'image_url').map((p) => p.image_url?.url)
-      : [];
-  return legacy.filter(Boolean).map((src, i) => ({ id: `image ${i + 1}`, kind: 'image', src }));
-}
-
-function assetBlobOrNull(a) {
-  try {
-    return assetBlob(a);
-  } catch {
-    return null;
+function renderItem(s, item) {
+  switch (item.type) {
+    case 'user':
+      return { node: userBubble(s, item.text, Array.isArray(item.atts) ? item.atts : []) };
+    case 'assistant': {
+      const v = assistantView(s);
+      v.apply(item);
+      return v;
+    }
+    case 'tool':
+      return toolCard(s, item);
+    case 'notice':
+      return noticeView(s, item);
+    case 'asset':
+      return { node: assetCard(s, s.assets.get(String(item.assetId).toLowerCase())) };
   }
+  return null;
 }
 
-function restoreAssets(s, m) {
-  for (const id of Array.isArray(m._assets) ? m._assets : []) assetCard(s, s.agent.assets.get(String(id).toLowerCase()));
+function upsertItem(s, item) {
+  if (!item?.id) return;
+  const rec = s.nodes.get(item.id);
+  if (rec) return rec.apply?.(item);
+  const r = renderItem(s, item);
+  if (r) s.nodes.set(item.id, r);
 }
 
-// History doesn't record failure explicitly; these are the agent's error/denial/cancel replies.
-const toolFailed = (m) => /^(error\b|cancelled\.|the user denied)/i.test(String(m.content ?? ''));
-
-function renderTranscript(s) {
+function renderItems(s, items, assets) {
+  s.assets = new Map((Array.isArray(assets) ? assets : []).filter((a) => a?.id).map((a) => [a.id, a]));
   s.restoring = true;
   s.chat.replaceChildren();
-  revokeUrls(s);
-  const cards = new Map();
+  s.nodes.clear();
   try {
-    for (const m of s.agent.messages) {
-      if (!m || typeof m !== 'object') continue;
-      if (m.role === 'user') {
-        const text = userText(m);
-        const atts = userAttachments(s, m);
-        if (text || atts.length) userBubble(s, text, atts);
-      } else if (m.role === 'assistant') {
-        assistantView(s).done(m);
-        // Images the model itself returned come right after its reply, before any tool calls.
-        restoreAssets(s, m);
-        for (const tc of m.tool_calls || []) cards.set(tc.id, toolCard(s, tc.function?.name, tc.function?.arguments));
-      } else if (m.role === 'tool') {
-        cards.get(m.tool_call_id)?.finish(m.content, toolFailed(m), m._images);
-        cards.delete(m.tool_call_id);
-        restoreAssets(s, m);
-      }
-    }
-    settleLive(s);
+    for (const item of Array.isArray(items) ? items : []) upsertItem(s, item);
   } finally {
     s.restoring = false;
   }
+  s.ready = true;
   if (!s.chat.children.length) showEmpty(s);
+  if (s === active) {
+    renderChips();
+    renderQueue();
+    updateComposer();
+  }
+  follow(s, true);
 }
 
 /* ---------- sessions ---------- */
 
-function pickMeta(m = {}) {
-  const now = Date.now();
-  return {
-    id: String(m.id),
-    title: typeof m.title === 'string' && m.title.trim() ? m.title : DEFAULT_TITLE,
-    createdAt: Number(m.createdAt) || now,
-    updatedAt: Number(m.updatedAt) || Number(m.createdAt) || now,
-    url: typeof m.url === 'string' ? m.url : '',
-    pageTitle: typeof m.pageTitle === 'string' ? m.pageTitle : '',
-  };
-}
-
-const cleanQueue = (q) =>
-  (Array.isArray(q) ? q : [])
-    .filter((x) => x && typeof x.text === 'string')
-    .map((x) => ({ id: String(x.id || newId()), text: x.text, attachmentIds: Array.isArray(x.attachmentIds) ? x.attachmentIds.map(String) : [] }));
-
-const queueMode = () => (settings?.queueMode === 'step' ? 'step' : 'auto');
-
-function createSession(meta, { stored = false, ready = false } = {}) {
+function createView(st) {
   const s = {
-    id: String(meta.id),
-    meta: pickMeta(meta),
-    stored, // exists in the store
-    ready, // history loaded (or a fresh chat)
-    loading: null,
-    renamed: false,
+    id: String(st.id),
+    meta: st.meta || { id: st.id, title: DEFAULT_TITLE },
+    state: st,
+    ready: false, // its transcript has arrived
     restoring: false,
-    muted: false, // ignore agent hooks (while importing or after closing)
+    nodes: new Map(), // item id → { node, apply }
+    assets: new Map(), // asset id → { id, kind, name, mime, size, label, url }
     draft: '',
     pending: [], // asset ids attached to the draft
     loadingNames: [],
     attaching: 0,
-    queue: [],
     queueOpen: false,
-    paused: false,
-    drain: false, // "Run all remaining" in step mode
-    running: false,
-    stopRequested: false,
-    runPromise: Promise.resolve(),
-    asking: 0,
-    live: new Set(),
-    noticeActions: new Set(),
     pinned: true,
     unread: false,
-    dirty: false,
-    saveTimer: 0,
-    saving: Promise.resolve(),
-    saveError: null,
     saveBanner: null,
-    roBanner: null,
     loadBanner: null,
-    assetBacklog: new Map(), // assets not yet written to the store
-    urls: new Map(), // Blob → object URL shown in this chat
-    readOnly: false,
-    lock: null,
-    lockWait: null,
+    draftTimer: 0,
+    starting: false,
     closed: false,
-    closing: false,
     closeArmed: false,
-    closeBlocked: false,
     closeTimer: 0,
   };
-  s.agent = new Agent(
-    {
-      assistantStart: () => assistantView(s),
-      toolStart: (name, args) => toolCard(s, name, args),
-      notice: (text, kind) => notice(s, text, kind),
-      asset: (a) => assetCard(s, a),
-    },
-    {
-      onChange: () => !s.muted && scheduleSave(s),
-      onAsset: (a) => !s.muted && queueAsset(s, a),
-    }
-  );
   buildTab(s);
   buildPane(s);
   sessions.set(s.id, s);
+  renderBanners(s);
   return s;
+}
+
+// The engine's list of open chats (the same in every panel): add, update, drop and order the tabs.
+function syncSessions(states, engineActive, { snapshot = false } = {}) {
+  const ids = states.map((x) => String(x.id));
+  const before = [...sessions.keys()];
+  const wasActive = active;
+  for (const s of [...sessions.values()]) if (!ids.includes(s.id) && !s.opening) dropView(s);
+  for (const st of states) {
+    const s = sessions.get(String(st.id));
+    if (!s) createView(st);
+    else {
+      // A restarted engine has not loaded this chat yet.
+      if (snapshot && !st.ready && s.ready) {
+        s.ready = false;
+        s.nodes.clear();
+        s.chat.replaceChildren();
+      }
+      applyState(s, st);
+    }
+  }
+  // Same order as the engine (a chat still being opened stays at the end).
+  const ordered = [...ids.map((id) => sessions.get(id)).filter(Boolean), ...[...sessions.values()].filter((s) => s.opening && !ids.includes(s.id))];
+  sessions.clear();
+  for (const s of ordered) {
+    sessions.set(s.id, s);
+    tabList.append(s.tab);
+  }
+  if (wasActive && !sessions.has(wasActive.id)) {
+    active = null;
+    const i = before.indexOf(wasActive.id);
+    const next = before.slice(i + 1).map((id) => sessions.get(id)).find(Boolean) || before.slice(0, i).reverse().map((id) => sessions.get(id)).find(Boolean) || sessions.get(engineActive);
+    const focus = closeFocus || 'input';
+    closeFocus = null;
+    if (next) activate(next, { focus });
+  }
+  if (!active && !snapshot && sessions.size) activate(sessions.get(engineActive) || [...sessions.values()].at(-1));
+}
+
+function dropView(s) {
+  s.closed = true;
+  clearTimeout(s.closeTimer);
+  clearTimeout(s.draftTimer);
+  resizer.unobserve(s.chat);
+  s.tab.remove();
+  s.pane.remove();
+  sessions.delete(s.id);
+  if (batchTarget === s) batchTarget = null;
+  if (queueClearArmed === s) disarmQueueClear();
+}
+
+function applyState(s, st) {
+  const wasRunning = s.state?.running;
+  // Sent, and the engine has not answered yet: it is starting.
+  if (s.starting && !st.running) st = { ...st, running: true };
+  s.state = st;
+  if (st.meta && !(s.starting && st.meta.title === DEFAULT_TITLE)) s.meta = st.meta;
+  if (!st.running && wasRunning) disarmClose(s);
+  renderTab(s);
+  renderBanners(s);
+  if (s === active) {
+    renderQueue();
+    updateComposer();
+  }
 }
 
 function buildTab(s) {
@@ -842,18 +966,17 @@ function renderTab(s) {
   if (!s.tab) return;
   const title = s.meta.title || DEFAULT_TITLE;
   const retitled = s.tabTitle.textContent !== title;
-  s.tabTitle.textContent = title;
+  if (!s.tab.querySelector('.ctab-edit')) s.tabTitle.textContent = title;
   s.tab.title = [title, s.meta.pageTitle || hostOf(s.meta.url)].filter(Boolean).join('\n');
   const states = [];
   const flag = (cls, on, label) => {
     s.tab.classList.toggle(cls, Boolean(on));
     if (on) states.push(label);
   };
-  flag('running', s.running, 'running');
-  flag('asking', s.asking > 0, 'waiting for your approval');
+  flag('running', s.state?.running, 'running');
+  flag('asking', s.state?.asking > 0, 'waiting for your approval');
   flag('unread', s.unread, 'new output');
-  flag('save-failed', s.saveError, 'not saved');
-  flag('readonly', s.readOnly, 'read-only');
+  flag('save-failed', s.state?.saveError, 'not saved');
   s.tab.setAttribute('aria-label', [title, ...states].join(', '));
   // The first prompt's title widens the tab, which can push the active tab past the strip's edge.
   if (retitled && s === active) s.tab.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
@@ -883,10 +1006,13 @@ function markUnread(s) {
   renderTab(s);
 }
 
-function activate(s, { focus = 'input' } = {}) {
+function activate(s, { focus = 'input', force = false } = {}) {
   if (!s || s.closed) return;
   const prev = active;
-  if (prev && prev !== s && !prev.closed) prev.draft = input.value;
+  if (prev && prev !== s && !prev.closed) {
+    prev.draft = input.value;
+    syncDraft(prev, true);
+  }
   if (prev !== s) disarmQueueClear();
   active = s;
   for (const x of sessions.values()) {
@@ -898,8 +1024,10 @@ function activate(s, { focus = 'input' } = {}) {
   }
   s.unread = false;
   renderTab(s);
+  // Its transcript comes from the engine (which loads it from the store first if needed).
+  if (!s.ready && !s.state?.loadError && !s.chat.children.length) showLoading(s);
   s.tab.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
-  if (prev !== s) {
+  if (prev !== s || force) {
     input.value = s.draft;
     autosize();
   }
@@ -907,26 +1035,40 @@ function activate(s, { focus = 'input' } = {}) {
   renderQueue();
   updateComposer();
   follow(s);
-  persistPanel();
-  if (!s.ready) hydrate(s);
+  if (prev !== s || force) tell('activate', { id: s.id });
   if (focus === 'input' && !input.disabled) input.focus();
   else if (focus === 'tab') s.tab.focus();
 }
 
-function newTab({ activateIt = true } = {}) {
-  const s = createSession(newSession(), { stored: false, ready: true });
-  showEmpty(s);
-  acquireLock(s.id).then((lock) => {
-    if (s.closed) lock.release();
-    else s.lock = lock;
-  });
-  if (activateIt) activate(s);
-  return s;
+// Shown at once under an id chosen here; the engine creates the chat with it.
+async function newTab() {
+  if (!engine.connected) return null;
+  const prev = active;
+  const id = crypto.randomUUID();
+  const p = cmd('new', { id });
+  const s = createView({ id, meta: { id, title: DEFAULT_TITLE }, ready: true, running: false, asking: 0, queue: [] });
+  s.opening = true;
+  renderItems(s, [], []);
+  activate(s);
+  try {
+    await p;
+    return s;
+  } catch (e) {
+    if (!s.closed) dropView(s);
+    if (active === s || !active) {
+      active = null;
+      const next = (prev && sessions.get(prev.id)) || [...sessions.values()].at(-1);
+      if (next) activate(next);
+    }
+    setStatus(failText('Could not open a new chat', e), 'error');
+    return null;
+  } finally {
+    s.opening = false;
+  }
 }
 
 // A brand-new chat nobody has touched: replacing it loses nothing.
-const isPristine = (s) =>
-  !s.stored && s.ready && !s.running && !s.agent.messages.length && !s.queue.length && !s.pending.length && !s.attaching && !(s.draft || '').trim();
+const isPristine = (s) => !s.state?.stored && s.ready && !s.state?.running && !s.nodes.size && !s.state?.queue?.length && !s.pending.length && !s.attaching && !(s === active ? input.value : s.draft || '').trim();
 
 async function openSession(id, meta = { id }) {
   const existing = sessions.get(id);
@@ -935,196 +1077,38 @@ async function openSession(id, meta = { id }) {
     return existing;
   }
   const prev = active;
-  const s = createSession({ ...meta, id }, { stored: true, ready: false });
+  const p = cmd('open', { id, meta, replace: prev && isPristine(prev) ? prev.id : null });
+  // Shown (loading) at once; the engine's list of open chats confirms it.
+  const s = createView({ id, meta: { ...meta, id, title: meta?.title || DEFAULT_TITLE }, ready: false, running: false, asking: 0, queue: [] });
+  s.opening = true;
   activate(s);
-  if (prev && prev !== s && isPristine(prev)) closeSession(prev, { save: false });
-  await s.loading;
-  return s;
-}
-
-function persistPanel() {
-  clearTimeout(panelTimer);
-  panelTimer = setTimeout(writePanel, 50);
-}
-
-function writePanel() {
-  clearTimeout(panelTimer);
-  panelTimer = 0;
-  const state = { open: [...sessions.keys()], active: active?.id || '' };
   try {
-    chrome.storage.local.set({ panel: state }).catch?.((e) => console.warn('Could not save open tabs', e));
+    await p;
   } catch (e) {
-    console.warn('Could not save open tabs', e);
-  }
-}
-
-/* ---------- loading & locking ---------- */
-
-const lockName = (id) => LOCK_PREFIX + id;
-
-// Resolves { ok, release }. ok is false when another panel (another window) has this chat open.
-function acquireLock(id) {
-  const free = { ok: true, release() {} };
-  if (!navigator.locks?.request) return Promise.resolve(free);
-  return new Promise((resolve) => {
-    navigator.locks
-      .request(lockName(id), { ifAvailable: true }, (lock) => {
-        if (!lock) return resolve({ ok: false, release() {} });
-        return new Promise((release) => resolve({ ok: true, release }));
-      })
-      .catch((e) => {
-        console.warn('Web lock unavailable', e);
-        resolve(free);
-      });
-  });
-}
-
-async function heldLocks() {
-  try {
-    const { held = [] } = (await navigator.locks?.query?.()) || {};
-    return new Set(held.map((l) => l.name));
-  } catch {
-    return new Set();
-  }
-}
-
-async function heldElsewhere(id) {
-  const s = sessions.get(id);
-  if (s?.lock?.ok) return false; // we hold it
-  if (s?.readOnly) return true;
-  return (await heldLocks()).has(lockName(id)); // includes tabs here that haven't loaded yet (they hold nothing)
-}
-
-function hydrate(s) {
-  if (s.loading) return s.loading;
-  s.loading = (async () => {
-    setLoadBanner(s, null);
-    s.chat.replaceChildren(el('div', 'pane-loading', 'Loading chat…'));
-    const lock = await acquireLock(s.id);
-    let data;
-    let assets = [];
-    let assetError = null;
-    try {
-      [data, assets] = await Promise.all([
-        withTimeout(store.get(s.id), STORE_TIMEOUT),
-        withTimeout(store.getAssets(s.id), STORE_TIMEOUT).catch((e) => {
-          assetError = e;
-          return [];
-        }),
-      ]);
-    } catch (e) {
-      lock.release();
-      s.loading = null;
-      if (s.closed) return;
-      s.chat.replaceChildren();
-      setLoadBanner(s, failText('Could not open this chat', e), true);
-      return;
+    if (!s.closed) dropView(s);
+    if (active === s || !active) {
+      active = null;
+      const next = (prev && sessions.get(prev.id)) || [...sessions.values()].at(-1);
+      if (next) activate(next);
     }
-    if (s.closed) return lock.release();
-    if (!data) {
-      lock.release();
-      s.loading = null;
-      s.stored = false;
-      s.chat.replaceChildren();
-      setLoadBanner(s, 'This chat is no longer saved — it may have been deleted in another window.', false);
-      return;
-    }
-    applyLoaded(s, data, assets, lock);
-    if (assetError) notice(s, `Some files of this chat could not be loaded: ${errText(assetError)}`, 'error');
-  })();
-  return s.loading;
-}
-
-function applyLoaded(s, data, assets, lock) {
-  s.meta = pickMeta({ ...data, id: s.id });
-  s.renamed = s.meta.title !== DEFAULT_TITLE;
-  s.muted = true;
-  try {
-    s.agent.importMessages(Array.isArray(data.messages) ? data.messages : [], Array.isArray(assets) ? assets : []);
-  } catch (e) {
-    console.warn('Could not restore chat', e);
+    throw e;
   } finally {
-    s.muted = false;
+    s.opening = false;
   }
-  s.queue = cleanQueue(data.queue);
-  s.paused = s.queue.length > 0; // a restored queue never starts by itself
-  s.drain = false;
-  s.stored = true;
-  s.ready = true;
-  s.lock = lock.ok ? lock : null;
-  setReadOnly(s, !lock.ok);
-  renderTranscript(s);
-  if (!s.readOnly && s.agent.canResume) {
-    notice(s, 'This chat was interrupted.', 'info', [{ label: 'Continue', id: 'continue', run: () => resumeRun(s) }]);
-  }
-  renderTab(s);
-  if (s === active) {
-    renderChips();
-    renderQueue();
-    updateComposer();
-  }
-  follow(s, true);
+  return sessions.get(id) || s;
 }
 
-function setReadOnly(s, on) {
-  s.readOnly = on;
-  if (!on) {
-    s.roBanner?.remove();
-    s.roBanner = null;
-    s.lockWait?.abort();
-    s.lockWait = null;
-  } else {
-    if (!s.roBanner) {
-      s.roBanner = banner(
-        'info',
-        'This chat is open in another window, so it is read-only here. It becomes editable when that window closes it.',
-        [{ label: 'Open a copy', id: 'open-copy', run: () => openCopy(s) }]
-      );
-      s.banners.append(s.roBanner);
-    }
-    waitForLock(s);
-  }
-  renderTab(s);
-  if (s === active) updateComposer();
+function syncDraft(s, now = false) {
+  if (!s || s.closed) return;
+  clearTimeout(s.draftTimer);
+  const send = () => tell('draft', { id: s.id, text: s === active ? input.value : s.draft, pending: s.pending });
+  if (now) send();
+  else s.draftTimer = setTimeout(send, DRAFT_DELAY);
 }
 
-// When the other window lets go, reload the latest saved copy and continue here.
-function waitForLock(s) {
-  if (!navigator.locks?.request || s.lockWait) return;
-  const ctrl = new AbortController();
-  s.lockWait = ctrl;
-  navigator.locks
-    .request(lockName(s.id), { signal: ctrl.signal }, (lock) => {
-      if (!lock) return;
-      return new Promise((release) => {
-        s.lockWait = null;
-        if (s.closed || !s.readOnly) return release();
-        takeOver(s, { ok: true, release });
-      });
-    })
-    .catch(() => {});
-}
+const pageInfo = () => ({ url: currentTab?.url || '', title: currentTab?.title || '' });
 
-async function takeOver(s, lock) {
-  let data;
-  let assets = [];
-  try {
-    [data, assets] = await Promise.all([
-      withTimeout(store.get(s.id), STORE_TIMEOUT),
-      withTimeout(store.getAssets(s.id), STORE_TIMEOUT).catch(() => []),
-    ]);
-  } catch (e) {
-    data = null;
-    console.warn('Could not reload chat', e);
-  }
-  if (s.closed || !data) {
-    lock.release();
-    if (!s.closed) setLoadBanner(s, 'This chat could not be reloaded after the other window closed it.', true);
-    return;
-  }
-  applyLoaded(s, data, assets, lock);
-  notice(s, 'The other window closed this chat, so you can continue it here.', 'info');
-}
+/* ---------- banners (load and save problems) ---------- */
 
 function banner(kind, text, actions = []) {
   const b = el('div', `banner ${kind}`);
@@ -1140,125 +1124,39 @@ function banner(kind, text, actions = []) {
   return b;
 }
 
-function setLoadBanner(s, text, canRetry) {
-  s.loadBanner?.remove();
-  s.loadBanner = null;
-  if (!text) return;
-  const actions = [];
-  if (canRetry) actions.push({ label: 'Retry', id: 'retry-load', run: () => hydrate(s) });
-  actions.push({ label: 'Close tab', id: 'close-tab', run: () => closeSession(s, { save: false }) });
-  s.loadBanner = banner('error', text, actions);
-  s.banners.append(s.loadBanner);
-}
-
-async function openCopy(s) {
-  try {
-    const title = clip(`${s.meta.title} (copy)`, 80);
-    const id = await store.copySession(s.id, { title });
-    if (!id) throw new Error('Nothing was copied.');
-    await openSession(id, { id, title });
-  } catch (e) {
-    notice(s, failText('Could not copy this chat', e), 'error');
-  }
-}
-
-/* ---------- saving ---------- */
-
-function scheduleSave(s) {
-  if (s.closed || s.readOnly || !s.ready) return;
-  s.dirty = true;
-  clearTimeout(s.saveTimer);
-  // The first save is immediate so a brand-new chat can't be lost to the debounce.
-  s.saveTimer = setTimeout(() => saveNow(s), s.stored ? SAVE_DELAY : 0);
-}
-
-// Serialised per session; never rejects (failures show in the chat).
-function saveNow(s) {
-  clearTimeout(s.saveTimer);
-  s.saveTimer = 0;
-  s.saving = s.saving.then(() => persist(s));
-  return s.saving;
-}
-
-async function persist(s) {
-  if (s.closed || s.readOnly || !s.ready) return;
-  try {
-    if (s.dirty) {
-      const messages = s.agent.exportMessages();
-      // An untouched "New chat" stays out of History.
-      if (!s.stored && !messages.length && !s.queue.length) {
-        s.dirty = false;
-        return;
-      }
-      s.dirty = false;
-      const session = { ...s.meta, messages, queue: s.queue.map((q) => ({ id: q.id, text: q.text, attachmentIds: [...q.attachmentIds] })) };
-      try {
-        await withTimeout(store.put(session), STORE_TIMEOUT);
-      } catch (e) {
-        s.dirty = true;
-        throw e;
-      }
-      s.stored = true;
+function renderBanners(s) {
+  const le = s.state?.loadError;
+  const loadKey = le ? `${le.text}|${le.retry}` : '';
+  if (loadKey !== (s.loadBanner?.dataset.key || '')) {
+    s.loadBanner?.remove();
+    s.loadBanner = null;
+    if (le) {
+      const actions = [];
+      if (le.retry) actions.push({ label: 'Retry', id: 'retry-load', run: () => tell('load', { id: s.id }) });
+      actions.push({ label: 'Close tab', id: 'close-tab', run: () => closeSession(s, { save: false }) });
+      s.loadBanner = banner('error', le.text, actions);
+      s.loadBanner.dataset.key = loadKey;
+      s.banners.append(s.loadBanner);
+      if (!s.ready) s.chat.replaceChildren();
     }
-    if (s.stored) {
-      for (const [id, a] of [...s.assetBacklog]) {
-        if (s.closed) return;
-        // Writing a big file to disk takes a while; allow about 5 MB/s on top of the usual limit.
-        await withTimeout(store.putAsset(s.id, a), STORE_TIMEOUT + Math.ceil((Number(a.size) || 0) / 5e6) * 1000);
-        if (s.assetBacklog.get(id) === a) s.assetBacklog.delete(id);
-      }
+  }
+  const se = s.state?.saveError;
+  const saveKey = se ? `${se}|${!!s.state.closeBlocked}` : '';
+  if (saveKey !== (s.saveBanner?.dataset.key || '')) {
+    if (!se) {
+      s.saveBanner?.remove();
+      s.saveBanner = null;
+    } else {
+      const actions = [{ label: 'Retry', id: 'retry-save', run: () => cmd('retrySave', { id: s.id }).catch(() => {}) }];
+      if (s.state.closeBlocked) actions.push({ label: 'Close without saving', id: 'close-unsaved', run: () => closeSession(s, { save: false }) });
+      const b = banner('error', failText('Could not save this chat', se), actions);
+      b.dataset.kind = 'save-error';
+      b.dataset.key = saveKey;
+      if (s.saveBanner) s.saveBanner.replaceWith(b);
+      else s.banners.prepend(b);
+      s.saveBanner = b;
     }
-    setSaveError(s, null);
-  } catch (e) {
-    console.warn('Could not save chat', e);
-    setSaveError(s, e);
   }
-}
-
-function queueAsset(s, a) {
-  if (!a?.id || s.closed || s.readOnly) return;
-  s.assetBacklog.set(a.id, a);
-  if (s.stored) saveNow(s);
-}
-
-function flushAll(timeout = 2000) {
-  const all = [...sessions.values()].map((s) => (s.dirty || s.saveTimer || s.assetBacklog.size ? saveNow(s) : s.saving));
-  return Promise.race([Promise.all(all), sleep(timeout)]);
-}
-
-function setSaveError(s, e) {
-  const msg = e ? errText(e) : null;
-  if (!msg) {
-    if (!s.saveError) return;
-    s.saveError = null;
-    s.closeBlocked = false;
-    s.saveBanner?.remove();
-    s.saveBanner = null;
-    renderTab(s);
-    return;
-  }
-  s.saveError = msg;
-  renderSaveBanner(s);
-  renderTab(s);
-}
-
-function renderSaveBanner(s) {
-  const actions = [
-    {
-      label: 'Retry',
-      id: 'retry-save',
-      run: () => {
-        s.dirty = true;
-        saveNow(s);
-      },
-    },
-  ];
-  if (s.closeBlocked) actions.push({ label: 'Close without saving', id: 'close-unsaved', run: () => closeSession(s, { save: false }) });
-  const b = banner('error', failText('Could not save this chat', s.saveError), actions);
-  b.dataset.kind = 'save-error';
-  if (s.saveBanner) s.saveBanner.replaceWith(b);
-  else s.banners.prepend(b);
-  s.saveBanner = b;
 }
 
 /* ---------- running jobs & the queue ---------- */
@@ -1270,140 +1168,50 @@ function modelProblem() {
   return '';
 }
 
-function setRunning(s, on) {
-  s.running = on;
-  if (!on) disarmClose(s);
-  renderTab(s);
-  if (s === active) {
-    updateComposer();
-    renderQueue();
-  }
-}
-
-function startJob(s, job) {
-  s.runPromise = runJob(s, job);
-  return s.runPromise;
-}
-
-// job: { kind: 'direct' | 'queued' | 'resume', text, attachmentIds, item }
-async function runJob(s, job) {
-  if (s.running || s.closed || s.readOnly || !s.ready) return;
-  const { agent } = s;
-  const ids = job.attachmentIds || [];
-  clearNoticeActions(s);
-  s.stopRequested = false;
-  const before = agent.messages.length;
-  let bubble = null;
-  if (job.kind !== 'resume') {
-    if (!before) {
-      if (!s.renamed) {
-        const names = ids.map((id) => agent.assets.get(id)?.name).filter(Boolean);
-        s.meta.title = titleFrom(job.text || names.join(', ')) || DEFAULT_TITLE;
-      }
-      if (!s.meta.url) {
-        s.meta.url = currentTab?.url || '';
-        s.meta.pageTitle = currentTab?.title || '';
-      }
-    }
-    bubble = userBubble(s, job.text, ids.map((id) => attachmentInfo(s, id)));
-    follow(s, true);
-  }
-  setRunning(s, true);
-  let error = null;
-  try {
-    if (job.kind === 'resume') await agent.resume(settings);
-    else await agent.run(job.text, ids, settings, job.kind === 'queued' ? { keepTab: true } : {});
-  } catch (e) {
-    error = e || new Error('Unknown error');
-  }
-  settleLive(s);
-  // Failproof: a prompt that never reached the history goes back where it came from.
-  if (error && job.kind !== 'resume' && !agent.messages.slice(before).some((m) => m?.role === 'user')) {
-    bubble?.remove();
-    if (job.kind === 'queued') s.queue.unshift(job.item);
-    else returnToComposer(s, job.text, ids);
-  }
-  setRunning(s, false);
-  scheduleSave(s);
-  if (s.closed) return;
-  const stopped = s.stopRequested || error?.name === 'AbortError';
-  if (error) {
-    const canResume = Boolean(agent.canResume);
-    if (error.name === 'AbortError') {
-      notice(s, 'Stopped.', 'info', canResume ? [{ label: 'Continue', id: 'continue', run: () => resumeRun(s) }] : []);
-    } else {
-      notice(s, errText(error), 'error', canResume ? [{ label: 'Retry', id: 'retry', run: () => resumeRun(s) }] : []);
-    }
-  }
-  if (error || stopped) {
-    if (s.queue.length) s.paused = true;
-    s.drain = false;
-  } else if (job.kind !== 'direct') {
-    // A queued job or a successful retry carries the queue on.
-    s.paused = false;
-  }
-  if (!s.queue.length) {
-    s.paused = false;
-    s.drain = false;
-  }
-  if (s === active) renderQueue();
-  if (!error && !stopped) continueQueue(s);
-}
-
-function continueQueue(s) {
-  if (s.running || s.closed || s.readOnly || s.paused || !s.queue.length) return;
-  if (queueMode() === 'auto' || s.drain) runNext(s);
-}
-
-function runNext(s) {
-  if (s.running || s.closed || s.readOnly || !s.ready || !s.queue.length) return;
-  const problem = modelProblem();
-  if (problem) {
-    s.paused = true;
-    setStatus(problem, 'error');
-    if (s === active) renderQueue();
-    return;
-  }
-  const item = s.queue.shift();
-  startJob(s, { kind: 'queued', item, text: item.text, attachmentIds: item.attachmentIds });
-  if (s === active) renderQueue();
-}
-
-function resumeRun(s) {
-  if (s.running || s.readOnly || s.closed || !s.ready) return;
-  const problem = modelProblem();
-  if (problem) return setStatus(problem, 'error');
-  if (!s.agent.canResume) {
-    notice(s, 'There is nothing to continue.', 'info');
-    return;
-  }
-  startJob(s, { kind: 'resume' });
-}
-
 function stopSession(s) {
-  if (!s?.running) return;
-  s.stopRequested = true;
-  s.agent.stop();
+  if (!s?.state?.running) return;
+  tell('stop', { id: s.id });
 }
 
 function submit() {
   const s = active;
-  if (!s || s.readOnly || !s.ready || s.attaching) return;
+  if (!s || !s.ready || s.attaching || !engine.connected) return;
   const text = input.value.trim();
   if (!text && !s.pending.length) return;
-  if (s.running) {
-    s.queue.push({ id: newId(), text, attachmentIds: s.pending.splice(0) });
-    clearComposer(s);
-    renderQueue();
-    scheduleSave(s);
-    announce(`Added to the queue. ${plural(s.queue.length, 'prompt')} waiting.`);
-    return;
+  const running = Boolean(s.state?.running);
+  if (!running) {
+    const problem = modelProblem();
+    if (problem) return setStatus(problem, 'error');
   }
-  const problem = modelProblem();
-  if (problem) return setStatus(problem, 'error');
   const ids = s.pending.splice(0);
+  const qid = newId();
   clearComposer(s);
-  startJob(s, { kind: 'direct', text, attachmentIds: ids });
+  // Shown at once (queued item, or the job running); the engine's state confirms it.
+  if (running) s.state = { ...s.state, queue: [...(s.state.queue || []), { id: qid, text, attachmentIds: ids }] };
+  else {
+    s.starting = true;
+    // The first prompt names the chat (the engine does the same), so the tab does not change size later.
+    if (!s.nodes.size && (s.meta.title || DEFAULT_TITLE) === DEFAULT_TITLE) {
+      const names = ids.map((id) => s.assets.get(id)?.name).filter(Boolean);
+      s.meta = { ...s.meta, title: titleFrom(text || names.join(', ')) || DEFAULT_TITLE };
+    }
+  }
+  applyState(s, s.state);
+  cmd('send', { id: s.id, text, attachmentIds: ids, qid, page: pageInfo() }).then(
+    (r) => {
+      s.starting = false;
+      if (r?.queued) announce(`Added to the queue. ${plural(r.n, 'prompt')} waiting.`);
+    },
+    (e) => {
+      // Nothing was started or queued: undo what was shown.
+      const was = s.starting;
+      s.starting = false;
+      applyState(s, { ...s.state, running: was ? false : s.state.running, queue: queueOf(s).filter((x) => x.id !== qid) });
+      returnToComposer(s, text, ids);
+      setStatus(errText(e), 'error');
+    }
+  );
+  syncDraft(s, true);
 }
 
 function clearComposer(s) {
@@ -1417,17 +1225,21 @@ function clearComposer(s) {
 function returnToComposer(s, text, ids = []) {
   const current = s === active ? input.value : s.draft;
   const merged = [current, text].filter((x) => x && x.trim()).join('\n\n');
-  for (const id of ids) if (!s.pending.includes(id)) s.pending.push(id);
+  for (const id of ids || []) if (!s.pending.includes(id)) s.pending.push(id);
   if (s === active) {
     input.value = merged;
     autosize();
     renderChips();
   } else s.draft = merged;
+  syncDraft(s);
 }
+
+const queueOf = (s) => (Array.isArray(s?.state?.queue) ? s.state.queue : []);
 
 function renderQueue() {
   const s = active;
-  const n = s?.ready ? s.queue.length : 0;
+  const q = queueOf(s);
+  const n = s?.ready ? q.length : 0;
   queueBar.hidden = !n;
   if (!n) {
     queueBar.dataset.state = 'empty';
@@ -1435,11 +1247,12 @@ function renderQueue() {
     return;
   }
   const mode = queueMode();
-  const paused = s.paused && !s.running;
-  const waiting = !s.running && !s.paused;
+  const running = Boolean(s.state.running);
+  const paused = s.state.paused && !running;
+  const waiting = !running && !s.state.paused;
   queueBar.classList.toggle('paused', paused);
-  queueBar.dataset.state = s.running ? 'running' : paused ? 'paused' : 'waiting';
-  queueSummary.textContent = paused ? `Paused — ${n} queued` : s.running ? `${n} queued · ${MODE_LABEL[mode]}` : `${n} queued`;
+  queueBar.dataset.state = running ? 'running' : paused ? 'paused' : 'waiting';
+  queueSummary.textContent = paused ? `Paused — ${n} queued` : running ? `${n} queued · ${MODE_LABEL[mode]}` : `${n} queued`;
   queueRunNext.hidden = !waiting;
   queueRunAll.hidden = !waiting || n < 2;
   queueResume.hidden = !paused;
@@ -1456,15 +1269,16 @@ function renderQueue() {
 }
 
 function renderQueueItems(s) {
-  const last = s.queue.length - 1;
+  const q = queueOf(s);
+  const last = q.length - 1;
   queueListEl.replaceChildren(
-    ...s.queue.map((q, i) => {
+    ...q.map((item, i) => {
       const li = el('li', 'queue-item');
-      li.dataset.queueId = q.id;
-      const text = el('span', 'q-text', q.text.replace(/\s+/g, ' ').trim() || '(attachments only)');
-      text.title = q.text;
+      li.dataset.queueId = item.id;
+      const text = el('span', 'q-text', item.text.replace(/\s+/g, ' ').trim() || '(attachments only)');
+      text.title = item.text;
       li.append(el('span', 'q-num', String(i + 1)), text);
-      const k = q.attachmentIds.length;
+      const k = item.attachmentIds.length;
       if (k) {
         const att = el('span', 'q-att');
         att.title = plural(k, 'attachment');
@@ -1481,31 +1295,33 @@ function renderQueueItems(s) {
   );
 }
 
+// Queue edits show at once on a local copy; the engine does the same and its state replaces the copy.
+function localQueue(s, fn) {
+  const q = [...queueOf(s)];
+  fn(q);
+  s.state = { ...s.state, queue: q, ...(q.length ? {} : { paused: false, drain: false }) };
+  renderQueue();
+}
+
 function onQueueItemClick(e) {
   const b = e.target.closest('button[data-action]');
   const s = active;
   if (!b || !s) return;
   const id = b.closest('.queue-item')?.dataset.queueId;
-  const i = s.queue.findIndex((q) => q.id === id);
+  const i = queueOf(s).findIndex((q) => q.id === id);
   if (i < 0) return;
   const action = b.dataset.action;
-  const q = s.queue;
-  if (action === 'up' && i > 0) [q[i - 1], q[i]] = [q[i], q[i - 1]];
-  else if (action === 'down' && i < q.length - 1) [q[i + 1], q[i]] = [q[i], q[i + 1]];
-  else if (action === 'remove') {
-    const [item] = q.splice(i, 1);
-    for (const aid of item.attachmentIds) discardIfUnused(s, aid);
-  } else if (action === 'edit') {
-    const [item] = q.splice(i, 1);
+  let item = null;
+  localQueue(s, (q) => {
+    if (action === 'up' && i > 0) [q[i - 1], q[i]] = [q[i], q[i - 1]];
+    else if (action === 'down' && i < q.length - 1) [q[i + 1], q[i]] = [q[i], q[i + 1]];
+    else if (action === 'remove' || action === 'edit') [item] = q.splice(i, 1);
+  });
+  if (action === 'edit' && item) {
     returnToComposer(s, item.text, item.attachmentIds);
     input.focus();
   }
-  if (!q.length) {
-    s.paused = false;
-    s.drain = false;
-  }
-  scheduleSave(s);
-  renderQueue();
+  tell('queue', { id: s.id, op: action, itemId: id });
   if (action === 'up' || action === 'down') {
     const li = [...queueListEl.children].find((x) => x.dataset.queueId === id);
     const same = li?.querySelector(`[data-action="${action}"]`);
@@ -1524,26 +1340,28 @@ function onQueueClear() {
   if (!s) return;
   if (queueClearArmed !== s) {
     queueClearArmed = s;
-    queueClear.textContent = `Clear ${s.queue.length}?`;
+    queueClear.textContent = `Clear ${queueOf(s).length}?`;
     queueClear.classList.add('confirm');
     setTimeout(() => queueClearArmed === s && disarmQueueClear(), CONFIRM_MS);
     return;
   }
   disarmQueueClear();
-  const items = s.queue.splice(0);
-  for (const item of items) for (const aid of item.attachmentIds) discardIfUnused(s, aid);
-  s.paused = false;
-  s.drain = false;
-  scheduleSave(s);
-  renderQueue();
+  localQueue(s, (q) => void q.splice(0));
+  tell('queue', { id: s.id, op: 'clear' });
   announce('Queue cleared.');
   input.focus();
+}
+
+// The engine checks the model first, like Send (a problem pauses the queue and shows in the status line).
+function queueRun(op) {
+  const s = active;
+  if (s) tell('queue', { id: s.id, op, page: pageInfo() });
 }
 
 /* ---------- closing tabs ---------- */
 
 function requestClose(s) {
-  if (s.running && !s.closeArmed) return armClose(s);
+  if (s.state?.running && !s.closeArmed) return armClose(s);
   closeSession(s);
 }
 
@@ -1569,57 +1387,26 @@ function disarmClose(s) {
 
 // Closing never deletes: the chat stays in History. save:false skips the final save (used before deleting).
 async function closeSession(s, { save = true } = {}) {
-  if (s.closed || s.closing) return false;
-  const hadFocus = tabList.contains(document.activeElement);
-  s.closing = true;
-  try {
-    disarmClose(s);
-    if (s.running) {
-      stopSession(s);
-      await Promise.race([s.runPromise, sleep(2000)]);
-    }
-    if (save && s.ready && !s.readOnly) {
-      if (s === active) s.draft = input.value;
-      // persist() times out its own storage calls, so this can't hang the close.
-      await saveNow(s);
-      if (s.dirty && !s.saveError) await saveNow(s); // a change that landed during the first write
-      if (s.saveError) {
-        // Never drop a chat that isn't safely stored.
-        s.closeBlocked = true;
-        renderSaveBanner(s);
-        activate(s);
-        announce('This chat could not be saved, so it was kept open.');
-        return false;
-      }
-    }
-  } finally {
-    s.closing = false;
+  if (s.closed) return false;
+  disarmClose(s);
+  if (s === active) {
+    s.draft = input.value;
+    closeFocus = tabList.contains(document.activeElement) ? 'tab' : 'input';
   }
-  s.closed = true;
-  s.muted = true;
-  clearTimeout(s.saveTimer);
-  clearTimeout(s.closeTimer);
-  s.lockWait?.abort();
-  s.lock?.release();
+  syncDraft(s, true);
+  let r;
   try {
-    s.agent.stop();
-    s.agent.reset(); // releases MCP connections
-  } catch {}
-  revokeUrls(s);
-  const ids = [...sessions.keys()];
-  const i = ids.indexOf(s.id);
-  sessions.delete(s.id);
-  resizer.unobserve(s.chat);
-  s.tab.remove();
-  s.pane.remove();
-  if (batchTarget === s) batchTarget = null;
-  if (active === s) {
-    active = null;
-    const next = sessions.get(ids[i + 1]) || sessions.get(ids[i - 1]);
-    if (next) activate(next, { focus: hadFocus ? 'tab' : 'input' });
+    r = await cmd('close', { id: s.id, save });
+  } catch (e) {
+    setStatus(failText('Could not close this chat', e), 'error');
+    return false;
   }
-  if (!sessions.size) newTab();
-  persistPanel();
+  if (!r?.closed && !s.closed) {
+    closeFocus = null;
+    activate(s);
+    announce('This chat could not be saved, so it was kept open.');
+    return false;
+  }
   return true;
 }
 
@@ -1628,19 +1415,14 @@ async function closeSession(s, { save = true } = {}) {
 async function renameChat(id, title) {
   const s = sessions.get(id);
   if (s) {
-    s.meta.title = title;
-    s.renamed = true;
+    s.meta = { ...s.meta, title };
     renderTab(s);
-    // Not stored yet: the first save carries the title.
-    if (!s.stored) return;
   }
-  await store.rename(id, title);
+  await cmd('rename', { id, title });
 }
 
 function startTabRename(s) {
   if (s.tab.querySelector('.ctab-edit')) return;
-  // The other window would overwrite the name on its next save.
-  if (s.readOnly) return announce('This chat is open in another window. Rename it there.');
   const box = el('input', 'ctab-edit');
   box.type = 'text';
   box.value = s.meta.title;
@@ -1658,12 +1440,13 @@ function startTabRename(s) {
     const v = box.value.replace(/\s+/g, ' ').trim();
     box.remove();
     s.tabTitle.hidden = false;
+    renderTab(s);
     if (s === active) s.tab.focus();
     if (!commit || !v || v === s.meta.title) return;
     try {
       await renameChat(s.id, v);
     } catch (e) {
-      notice(s, failText('Could not rename this chat', e), 'error');
+      tell('notice', { id: s.id, text: failText('Could not rename this chat', e), kind: 'error' });
     }
   };
   box.addEventListener('keydown', (e) => {
@@ -1682,6 +1465,11 @@ function startTabRename(s) {
 
 /* ---------- attachments ---------- */
 
+function attachmentInfo(s, id) {
+  const a = s.assets.get(String(id).toLowerCase());
+  return a ? { ...a } : { id, kind: 'file', name: id };
+}
+
 function renderChips() {
   const s = active;
   if (!s) return;
@@ -1692,8 +1480,19 @@ function renderChips() {
   updateComposer();
 }
 
+// The file goes straight into the chat store (shared with the engine); the engine then takes it from there.
+async function attachOne(s, f) {
+  const d = await fileToAssetData(f);
+  const meta = await cmd('attachReserve', { id: s.id, name: d.name, mime: d.mime, size: d.size });
+  const ms = STORE_TIMEOUT + Math.ceil((Number(d.size) || 0) / 5e6) * 1000;
+  await withTimeout(store.putAsset(s.id, { ...meta, blob: toBlob(d.blob, meta.mime) }), ms);
+  const asset = await cmd('attach', { id: s.id, assetId: meta.id });
+  s.assets.set(asset.id, asset);
+  return asset;
+}
+
 async function addFiles(s, files) {
-  if (!s || s.readOnly || !files.length) return;
+  if (!s || !files.length) return;
   const names = files.map((f) => f.name || 'file');
   s.attaching += files.length;
   s.loadingNames.push(...names);
@@ -1701,62 +1500,54 @@ async function addFiles(s, files) {
   for (const [i, f] of files.entries()) {
     const name = names[i];
     try {
-      const asset = await s.agent.attach(f);
+      const asset = await attachOne(s, f);
       if (!s.closed && asset?.id && !s.pending.includes(asset.id)) s.pending.push(asset.id);
     } catch (e) {
       const msg = errText(e);
-      notice(s, msg.includes(name) ? msg : `Could not attach ${name}: ${msg}`, 'error');
+      const text = msg.includes(name) ? msg : `Could not attach ${name}: ${msg}`;
+      cmd('notice', { id: s.id, text, kind: 'error' }).catch(() => setStatus(text, 'error'));
     } finally {
       s.attaching--;
       s.loadingNames.splice(s.loadingNames.indexOf(name), 1);
       if (s === active) renderChips();
     }
   }
+  syncDraft(s);
 }
 
 function attachExisting(s, id) {
-  if (!id || s.readOnly || !s.agent.assets.has(id)) return;
+  if (!id || !s.assets.has(id)) return;
   if (!s.pending.includes(id)) s.pending.push(id);
   if (s === active) {
     renderChips();
     input.focus();
   }
+  syncDraft(s);
 }
 
 function removePending(s, id) {
   s.pending = s.pending.filter((x) => x !== id);
-  discardIfUnused(s, id);
+  // The engine drops the file if nothing else uses it (a queued prompt, the history).
+  tell('discard', { id: s.id, assetId: id });
   renderChips();
   input.focus();
-}
-
-// Drop a user upload that was never sent (still only in the draft or a removed queue item).
-function discardIfUnused(s, id) {
-  const a = s.agent.assets.get(id);
-  if (!a || a.label !== 'attached') return;
-  if (s.pending.includes(id) || s.queue.some((q) => q.attachmentIds.includes(id))) return;
-  if (s.agent.messages.some((m) => m?._attachments?.some?.((x) => x?.id === id) || m?._assets?.includes?.(id))) return;
-  revokeUrls(s, a);
-  s.agent.removeAsset(id);
-  const unsaved = s.assetBacklog.delete(id);
-  if (s.stored && !unsaved) store.deleteAsset(s.id, id).catch((e) => console.warn('Could not delete file', e));
+  syncDraft(s);
 }
 
 /* ---------- providers & models ---------- */
 
 const activeProvider = () => settings.providers.find((p) => p.id === settings.activeProviderId) || settings.providers[0] || null;
+const queueMode = () => (settings?.queueMode === 'step' ? 'step' : 'auto');
 
 async function saveAll() {
-  if (settings.approval !== lastApproval) {
-    lastApproval = settings.approval;
-    for (const s of sessions.values()) s.agent.autoApprove = false;
-    approvalSel.value = settings.approval;
-  }
+  approvalSel.value = settings.approval;
   try {
     await saveSettings(settings);
   } catch (e) {
     setStatus(`Could not save settings: ${errText(e)}`, 'error');
   }
+  // The engine also hears about it from chrome.storage; this makes the change apply at once.
+  tell('settings');
 }
 
 function renderProviderSelect() {
@@ -1849,16 +1640,16 @@ function autosize() {
 
 function updateComposer() {
   const s = active;
-  const ro = !s || s.readOnly;
-  input.disabled = ro;
-  input.placeholder = ro ? 'Read-only: this chat is open in another window' : s.running ? 'Add a prompt to the queue…' : PLACEHOLDER;
-  sendBtn.textContent = s?.running ? 'Queue' : 'Send';
-  sendBtn.title = s?.running ? 'Add to the queue — it runs when the current job ends (Enter)' : 'Send (Enter)';
-  sendBtn.disabled = ro || !s.ready || s.attaching > 0 || (!input.value.trim() && !s.pending.length);
-  stopBtn.hidden = !s?.running;
-  attachBtn.disabled = ro;
-  batchBtn.disabled = ro || !s.ready;
-  document.body.classList.toggle('running', Boolean(s?.running));
+  const running = Boolean(s?.state?.running);
+  input.disabled = !s;
+  input.placeholder = running ? 'Add a prompt to the queue…' : PLACEHOLDER;
+  sendBtn.textContent = running ? 'Queue' : 'Send';
+  sendBtn.title = running ? 'Add to the queue — it runs when the current job ends (Enter)' : 'Send (Enter)';
+  sendBtn.disabled = !s || !s.ready || !engine.connected || s.attaching > 0 || (!input.value.trim() && !s.pending.length);
+  stopBtn.hidden = !running;
+  attachBtn.disabled = !s;
+  batchBtn.disabled = !s || !s.ready;
+  document.body.classList.toggle('running', running);
 }
 
 /* ---------- active browser tab ---------- */
@@ -1900,6 +1691,7 @@ function openSettings() {
       renderModels();
     },
   });
+  if (FIREFOX) firefoxSettings();
   appEl.inert = true;
   settingsEl.hidden = false;
   settingsBody.scrollTop = 0;
@@ -1977,6 +1769,9 @@ function setHistoryEmpty(text, { retry = false } = {}) {
   }
 }
 
+// The engine writes chats; before reading the store, let it finish what it has pending.
+const flushEngine = (args = {}) => withTimeout(cmd('flush', args), STORE_TIMEOUT + 1000, 'The agent').catch(() => {});
+
 async function openHistory() {
   closeCustomModel(false);
   appEl.inert = true;
@@ -1988,7 +1783,7 @@ async function openHistory() {
   historyList.replaceChildren();
   historyMore.hidden = true;
   setHistoryEmpty('Loading…');
-  await flushAll(1500);
+  await flushEngine({ timeout: 1500 });
   await loadHistory();
 }
 
@@ -2135,7 +1930,11 @@ async function onHistoryClick(e) {
 async function openFromHistory(id) {
   const meta = metaOf(id) || { id };
   closeHistory({ focus: 'none' });
-  await openSession(id, meta);
+  try {
+    await openSession(id, meta);
+  } catch (e) {
+    setStatus(failText('Could not open the chat', e), 'error');
+  }
   if (!input.disabled) input.focus();
 }
 
@@ -2162,7 +1961,6 @@ function startHistoryRename(row, id) {
     main.hidden = false;
     main.focus();
     if (!commit || !v || v === titleEl.textContent) return;
-    if (await heldElsewhere(id)) return historyMessage('This chat is open in another window. Rename it there.', 'error');
     const old = titleEl.textContent;
     titleEl.textContent = v;
     try {
@@ -2201,14 +1999,9 @@ function confirmDelete(b, id) {
 }
 
 async function deleteChat(id) {
-  if (await heldElsewhere(id)) {
-    historyMessage('This chat is open in another window. Close it there first, then delete it.', 'error');
-    return;
-  }
-  const s = sessions.get(id);
-  if (s) await closeSession(s, { save: false });
   try {
-    await store.delete(id);
+    // The engine closes the chat (in every panel) and deletes it with its files.
+    await cmd('delete', { id });
   } catch (e) {
     historyMessage(failText('Could not delete the chat', e), 'error');
     return loadHistory();
@@ -2273,14 +2066,9 @@ function downloadBlob(blob, name) {
   setTimeout(() => URL.revokeObjectURL(url), blob.size > 50e6 ? 600000 : 60000);
 }
 
-async function flushOne(id) {
-  const s = sessions.get(id);
-  if (s && (s.dirty || s.saveTimer || s.assetBacklog.size)) await Promise.race([saveNow(s), sleep(STORE_TIMEOUT)]);
-}
-
 // A chat with files exports as a .zip (manifest + the files themselves), one without as .json.
 async function exportJson(id) {
-  await flushOne(id);
+  await flushEngine({ id });
   let file;
   try {
     file = await store.exportSession(id);
@@ -2291,7 +2079,7 @@ async function exportJson(id) {
 }
 
 async function exportMarkdown(id) {
-  await flushOne(id);
+  await flushEngine({ id });
   let session;
   try {
     session = await store.get(id);
@@ -2303,7 +2091,7 @@ async function exportMarkdown(id) {
 }
 
 async function exportAll() {
-  await flushAll();
+  await flushEngine();
   try {
     const file = await store.exportAll();
     downloadBlob(file.blob, `agent-chats-all-${today()}.${file.ext}`);
@@ -2322,6 +2110,8 @@ function readText(file) {
   });
 }
 
+// Imports are written to the store here (a big .zip is read in place, never sent to the engine); the engine
+// is then asked to open the first imported chat.
 async function importFiles(files) {
   if (!files.length) return;
   historyMessage(`Importing ${plural(files.length, 'file')}…`);
@@ -2354,7 +2144,14 @@ async function importFiles(files) {
   }
   if (!ids.length) return historyMessage('No chats were found in that file.', 'error');
   closeHistory({ focus: 'none' });
-  await openSession(ids[0]);
+  try {
+    // Its title is shown at once (the store's list holds only the small metadata).
+    const meta = (await store.list().catch(() => [])).find((m) => m.id === ids[0]) || { id: ids[0] };
+    await openSession(ids[0], meta);
+  } catch (e) {
+    setStatus(failText('Could not open the imported chat', e), 'error');
+    return;
+  }
   flashStatus(done);
   if (!input.disabled) input.focus();
 }
@@ -2377,7 +2174,7 @@ function expandBatch(items, template) {
 
 function openBatch() {
   const s = active;
-  if (!s || s.readOnly || !s.ready) return;
+  if (!s || !s.ready) return;
   closeCustomModel(false);
   batchTarget = s;
   for (const r of batchModeInputs) r.checked = r.value === queueMode();
@@ -2408,63 +2205,37 @@ function updateBatchPreview() {
 function addBatch() {
   const s = batchTarget && !batchTarget.closed ? batchTarget : active;
   const jobs = expandBatch(batchItems.value, batchTemplate.value);
-  if (!jobs.length || !s || s.readOnly || !s.ready) return;
+  if (!jobs.length || !s || !s.ready) return;
   const mode = batchModeInputs.find((r) => r.checked)?.value === 'step' ? 'step' : 'auto';
   if (mode !== queueMode()) {
     settings.queueMode = mode;
     saveAll();
   }
-  for (const text of jobs) s.queue.push({ id: newId(), text, attachmentIds: [] });
   batchItems.value = '';
   batchTemplate.value = '';
   closeBatch({ focus: false });
   if (s !== active) activate(s);
-  scheduleSave(s);
-  announce(`${plural(jobs.length, 'job')} added to the queue.`);
-  // Adding jobs is a request to run them: un-pause, and start right away when idle (from the front).
-  s.paused = false;
-  s.drain = false;
-  if (!s.running) runNext(s);
-  renderQueue();
-  if (!input.disabled) input.focus();
-}
-
-/* ---------- restore ---------- */
-
-async function restoreSessions() {
-  let state = {};
-  try {
-    ({ panel: state = {} } = await chrome.storage.local.get('panel'));
-  } catch {}
-  let open = Array.isArray(state?.open) ? state.open.filter((x) => typeof x === 'string' && x) : [];
-  let activeId = typeof state?.active === 'string' ? state.active : '';
-  try {
-    const legacy = await withTimeout(store.migrateLegacy(), STORE_TIMEOUT);
-    if (legacy) {
-      if (!open.includes(legacy)) open.push(legacy);
-      activeId = legacy;
+  // Shown at once (the first job starting when idle, like the engine does); the engine's state confirms it.
+  const items = jobs.map((text) => ({ id: newId(), text, attachmentIds: [] }));
+  const idle = !s.state.running && !modelProblem();
+  if (idle) s.starting = true;
+  localQueue(s, (q) => {
+    q.push(...items);
+    if (idle) q.shift();
+  });
+  s.state = { ...s.state, paused: false, drain: false };
+  applyState(s, s.state);
+  cmd('batch', { id: s.id, jobs: items, mode, page: pageInfo() }).then(
+    () => {
+      s.starting = false;
+      announce(`${plural(jobs.length, 'job')} added to the queue.`);
+    },
+    (e) => {
+      s.starting = false;
+      setStatus(failText('Could not add the jobs', e), 'error');
     }
-  } catch (e) {
-    setStatus(`Could not restore the chat from the previous version: ${errText(e)}`, 'error');
-  }
-  let metas = null;
-  try {
-    metas = await withTimeout(store.list(), STORE_TIMEOUT);
-  } catch (e) {
-    setStatus(failText('Could not load saved chats', e), 'error');
-  }
-  const byId = new Map((metas || []).map((m) => [m.id, m]));
-  const held = await heldLocks();
-  // Chats open in another window's panel stay there (they're in History if needed here).
-  open = [...new Set(open)].filter((id) => (!metas || byId.has(id)) && !held.has(lockName(id)));
-  for (const id of open) createSession(byId.get(id) || { id, title: 'Chat' }, { stored: true, ready: false });
-  const first = sessions.get(activeId) || [...sessions.values()].at(-1);
-  if (!first) {
-    newTab();
-    return;
-  }
-  activate(first);
-  await first.loading;
+  );
+  if (!input.disabled) input.focus();
 }
 
 /* ---------- wiring ---------- */
@@ -2593,7 +2364,7 @@ function bindEvents() {
     } else if (!settingsEl.hidden) {
       e.preventDefault();
       closeSettings();
-    } else if (active?.running && !e.defaultPrevented) {
+    } else if (active?.state?.running && !e.defaultPrevented) {
       // v1.0: Esc stops, wherever the focus is.
       e.preventDefault();
       stopSession(active);
@@ -2609,13 +2380,14 @@ function bindEvents() {
   input.addEventListener('input', () => {
     autosize();
     updateComposer();
+    syncDraft(active);
   });
   input.addEventListener('keydown', (e) => {
     // keyCode 229 = IME still composing (Safari-style); isComposing covers Chrome.
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
       e.preventDefault();
       submit();
-    } else if (e.key === 'Escape' && active?.running) {
+    } else if (e.key === 'Escape' && active?.state?.running) {
       e.preventDefault();
       e.stopPropagation();
       stopSession(active);
@@ -2643,27 +2415,9 @@ function bindEvents() {
     active.queueOpen = !active.queueOpen;
     renderQueue();
   });
-  queueRunNext.addEventListener('click', () => {
-    const s = active;
-    if (!s) return;
-    s.paused = false;
-    s.drain = false;
-    runNext(s);
-  });
-  queueRunAll.addEventListener('click', () => {
-    const s = active;
-    if (!s) return;
-    s.paused = false;
-    s.drain = true;
-    runNext(s);
-  });
-  queueResume.addEventListener('click', () => {
-    const s = active;
-    if (!s) return;
-    s.paused = false;
-    s.drain = false;
-    runNext(s);
-  });
+  queueRunNext.addEventListener('click', () => queueRun('runNext'));
+  queueRunAll.addEventListener('click', () => queueRun('runAll'));
+  queueResume.addEventListener('click', () => queueRun('resume'));
   queueClear.addEventListener('click', onQueueClear);
   queueModeSel.addEventListener('change', () => {
     settings.queueMode = queueModeSel.value === 'step' ? 'step' : 'auto';
@@ -2740,17 +2494,11 @@ function bindEvents() {
     if (!appEl.inert && active) addFiles(active, [...e.dataTransfer.files]);
   });
 
-  // save before the panel goes away
+  // The engine keeps the chats; only the draft being typed lives here until it is sent over.
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') {
-      flushAll();
-      if (panelTimer) writePanel();
-    }
+    if (document.visibilityState === 'hidden' && active) syncDraft(active, true);
   });
-  window.addEventListener('pagehide', () => {
-    flushAll();
-    if (panelTimer) writePanel();
-  });
+  window.addEventListener('pagehide', () => active && syncDraft(active, true));
 
   tabIcon.addEventListener('error', () => (tabIcon.hidden = true));
   chrome.tabs.onActivated.addListener((info) => {
@@ -2762,9 +2510,72 @@ function bindEvents() {
   });
 }
 
+/* ---------- Firefox ---------- */
+
+// Firefox shows this page in its sidebar (moz-extension://). The code below runs only there, never in Chrome.
+const FIREFOX = location.protocol === 'moz-extension:';
+const ALL_SITES = { origins: ['<all_urls>'] };
+let siteBanner = null;
+
+// Firefox lets people take an extension's access to websites away (about:addons → Permissions), and versions
+// before 127 did not grant it at install. Without it the agent can neither work on pages nor reach model
+// servers, so the panel asks for it. permissions.request must run in the click itself (nothing awaited first).
+async function checkSiteAccess() {
+  let granted = true;
+  try {
+    granted = await chrome.permissions.contains(ALL_SITES);
+  } catch {}
+  if (granted) {
+    siteBanner?.remove();
+    siteBanner = null;
+    return;
+  }
+  if (siteBanner) return;
+  const allow = () =>
+    chrome.permissions.request(ALL_SITES).then(
+      (ok) => {
+        if (!ok) return setStatus('Firefox did not give access to websites.', 'error');
+        checkSiteAccess();
+        syncOriginRules(settings).catch(() => {});
+        const p = activeProvider();
+        if (p && !p.models?.length) fetchModels(p, { quiet: true });
+      },
+      (e) => setStatus(`Could not ask for access to websites: ${errText(e)}`, 'error')
+    );
+  siteBanner = el('div', 'pane-banners site-access');
+  siteBanner.append(
+    banner('error', 'Agent Automation needs access to all websites to read and act on pages and to reach your model. Firefox has not given it yet.', [
+      { label: 'Allow access', id: 'allowSites', run: allow },
+    ])
+  );
+  chatsEl.before(siteBanner);
+}
+
+// Trusted input events use Chrome's debugger API, which Firefox does not have: the switch is shown off and
+// disabled (the engine ignores the setting there).
+function firefoxSettings() {
+  for (const label of settingsBody.querySelectorAll('.field.check label')) {
+    if (label.textContent.trim() !== 'Trusted input events') continue;
+    const box = label.querySelector('input[type="checkbox"]');
+    if (box) {
+      box.checked = false;
+      box.disabled = true;
+    }
+    const hint = label.closest('.field')?.querySelector('.hint');
+    if (hint) hint.textContent = 'Not available in Firefox: it needs Chrome’s debugger API.';
+  }
+}
+
+function setupFirefox() {
+  if (!FIREFOX) return;
+  checkSiteAccess();
+  chrome.permissions.onAdded?.addListener(() => checkSiteAccess());
+  chrome.permissions.onRemoved?.addListener(() => checkSiteAccess());
+}
+
 async function init() {
+  setupFirefox();
   settings = await loadSettings();
-  lastApproval = settings.approval;
   await syncOriginRules(settings);
   approvalSel.value = settings.approval;
   renderProviderSelect();
@@ -2776,13 +2587,7 @@ async function init() {
     windowId = (await chrome.windows.getCurrent()).id;
   } catch {}
   await updateTab();
-  try {
-    await restoreSessions();
-  } catch (e) {
-    console.error(e);
-    setStatus(`Could not restore your open chats: ${errText(e)}`, 'error');
-  }
-  if (!sessions.size) newTab();
+  await connectEngine();
   if (!input.disabled) input.focus();
 
   const p = activeProvider();

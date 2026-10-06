@@ -4,6 +4,7 @@
 // "no lost chats": writes are atomic and serialised per chat, and every failure surfaces as an Error a person can read.
 
 import { assetBlob, formatBytes, isBlob, readZip, toBlob, writeZip, MAX_ZIP_BYTES } from './files.js';
+import { api } from './host/api.js';
 
 const DB_NAME = 'agent-automation';
 const META = 'sessions';
@@ -498,6 +499,17 @@ export const store = {
     return assets.sort(assetOrder);
   },
 
+  // One asset (with its Blob), or null.
+  async getAsset(sessionId, assetId) {
+    let rec;
+    try {
+      rec = await withTx([ASSET], 'readonly', (t) => reqP(t.objectStore(ASSET).get([sessionId, assetId])));
+    } catch (e) {
+      throw friendly(e, 'load the file');
+    }
+    return rec ? toAsset(rec) : null;
+  },
+
   deleteAsset(sessionId, assetId) {
     return serial(sessionId, () => withTx([ASSET], 'readwrite', (t) => void t.objectStore(ASSET).delete([sessionId, assetId]))).catch((e) => {
       throw friendly(e, 'delete the file');
@@ -666,7 +678,8 @@ export const store = {
   // and only delete the old copy after the new one has been read back. Never rejects: on any problem the
   // old chat simply stays where it is and the move is tried again next time.
   async migrateLegacy() {
-    const area = globalThis.chrome?.storage?.local;
+    // The offscreen engine has no chrome.storage of its own: there the service worker reads it (api rpc).
+    const area = globalThis.chrome?.storage?.local || (api.mode === 'rpc' && globalThis.chrome?.runtime?.sendMessage ? api.storage.local : null);
     if (!area?.get) return null;
     try {
       const { chat } = await area.get('chat');

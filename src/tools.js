@@ -1,5 +1,5 @@
-import { pageRead, pageAct, pageChunk, mainEval } from './page.js';
-import { cdp, cdpClick, cdpInsertText, cdpKey, cdpEval } from './cdp.js';
+import { api } from './host/api.js';
+import { cdp, cdpClick, cdpInsertText, cdpKey, cdpEval, hasDebugger, NO_DEBUGGER } from './cdp.js';
 import { sleep, pause, blobToDataUrl, httpError, safeParse, mimeOf, withExt } from './util.js';
 import { extractText, formatBytes, guessMime, MAX_ATTACH_BYTES, MAX_DATA_URL_BYTES, assetBlob, assetDataUrl, bytesToBase64, toBlob } from './files.js';
 
@@ -12,7 +12,13 @@ const NAVIGATED = 'The page navigated or reloaded during the action. Call read_p
 function friendly(e) {
   const m = String(e?.message || e);
   if (/Cannot access|cannot be scripted|chrome:\/\/|extensions gallery/i.test(m)) return RESTRICTED;
-  if (/No tab with id/i.test(m)) return GONE;
+  // Firefox says this for its own and other extensions' pages, and for every site while the user has not given
+  // the extension access to websites (the panel then shows an "Allow access" banner).
+  if (/Missing host permission/i.test(m)) return `${RESTRICTED} If it is a normal website, Firefox has not given Agent Automation access to websites: ask the user to click "Allow access" in the panel.`;
+  if (/No tab with id|Invalid tab ID/i.test(m)) return GONE;
+  // Firefox before 152 (and after some updates) does not count "access to all websites" for screenshots of MV3
+  // add-ons; it allows them on a tab where the user clicked the toolbar button or pressed the shortcut.
+  if (/Missing activeTab permission/i.test(m)) return 'Firefox did not allow a screenshot of this tab. Ask the user to click the Agent Automation toolbar button (or press its shortcut) while this tab is shown, then try again; or use read_page.';
   if (/showing error page/i.test(m)) return 'The page failed to load (the browser is showing an error page). Check the URL or try again.';
   if (/Frame with ID|frame.*removed/i.test(m)) return NAVIGATED;
   return m;
@@ -22,9 +28,10 @@ const rethrow = (e) => {
   throw new Error(friendly(e));
 };
 
-async function inject(tabId, func, arg, world = 'ISOLATED') {
+// funcName: an export of page.js (only those can be injected from the offscreen document).
+async function inject(tabId, funcName, arg, world = 'ISOLATED') {
   try {
-    const [res] = await chrome.scripting.executeScript({ target: { tabId }, func, args: [arg ?? {}], world });
+    const [res] = await api.scripting.executeScript({ target: { tabId }, funcName, args: [arg ?? {}], world });
     return res?.result;
   } catch (e) {
     rethrow(e);
@@ -32,7 +39,7 @@ async function inject(tabId, func, arg, world = 'ISOLATED') {
 }
 
 async function act(tabId, action) {
-  const r = await inject(tabId, pageAct, action);
+  const r = await inject(tabId, 'pageAct', action);
   if (!r) throw new Error('No response from page.');
   if (r.error) throw new Error(r.error);
   return r;
@@ -48,8 +55,8 @@ const short = (s, n = 60) => {
 async function tabOf(args, ctx) {
   if (has(args.tab_id)) return Number(args.tab_id);
   if (ctx.tabId != null) return Number(ctx.tabId);
-  let [t] = ctx.windowId != null ? await chrome.tabs.query({ active: true, windowId: ctx.windowId }) : [];
-  if (!t) [t] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  let [t] = ctx.windowId != null ? await api.tabs.query({ active: true, windowId: ctx.windowId }) : [];
+  if (!t) [t] = await api.tabs.query({ active: true, lastFocusedWindow: true });
   if (!t) throw new Error('No active tab. Use open_tab.');
   ctx.tabId = t.id;
   return Number(t.id);
@@ -59,20 +66,20 @@ async function settle(tabId, ms = 350, max = 12000, signal) {
   await pause(ms, signal);
   const end = Date.now() + max;
   while (Date.now() < end) {
-    const t = await chrome.tabs.get(tabId).catch(() => null);
+    const t = await api.tabs.get(tabId).catch(() => null);
     if (!t || t.status === 'complete') return;
     await pause(150, signal);
   }
 }
 
 async function pageLine(tabId) {
-  const t = await chrome.tabs.get(tabId).catch(() => null);
+  const t = await api.tabs.get(tabId).catch(() => null);
   return t ? `Page now: "${t.title || ''}" — ${t.url || t.pendingUrl || ''}` : 'The tab is gone (it was closed).';
 }
 
 // Runs a page-changing action, waits for the page to settle and reports where we ended up.
 async function acting(tabId, ctx, fn, max = 12000) {
-  const before = new Set((await chrome.tabs.query({})).map((t) => t.id));
+  const before = new Set((await api.tabs.query({})).map((t) => t.id));
   let msg;
   try {
     msg = await fn();
@@ -83,11 +90,15 @@ async function acting(tabId, ctx, fn, max = 12000) {
   }
   await settle(tabId, 350, max, ctx.signal);
   const lines = [msg, await pageLine(tabId)];
-  for (const t of await chrome.tabs.query({})) {
+  for (const t of await api.tabs.query({})) {
     if (!before.has(t.id)) lines.push(`New tab opened: id=${t.id} ${t.pendingUrl || t.url} (use switch_tab to work in it)`);
   }
   return lines.join('\n');
 }
+
+// Trusted input events go through Chrome's debugger. Firefox has none: there the setting is ignored, and says so.
+const trusted = (ctx) => Boolean(ctx.settings.trustedInput) && hasDebugger();
+const untrustedNote = (ctx) => (ctx.settings.trustedInput && !hasDebugger() ? `\nNote: trusted input events are ${NO_DEBUGGER}; a normal page event was used.` : '');
 
 function target(args, required = true) {
   if (has(args.id)) return { id: args.id };
@@ -224,15 +235,15 @@ export async function modelImage(asset) {
 }
 
 export async function capture(tabId) {
-  const tab = await chrome.tabs.get(tabId).catch(rethrow);
+  const tab = await api.tabs.get(tabId).catch(rethrow);
   if (!tab.active) {
-    await chrome.tabs.update(tabId, { active: true });
+    await api.tabs.update(tabId, { active: true });
     await sleep(250);
   }
   let shot;
   for (let i = 0; ; i++) {
     try {
-      shot = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 70 });
+      shot = await api.tabs.captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 70 });
       break;
     } catch (e) {
       // Chrome allows only ~2 captures per second.
@@ -242,7 +253,7 @@ export async function capture(tabId) {
   }
   const img = await encode(shot, { maxW: 1280, quality: 0.75 });
   // tab.width is in device-independent px; page zoom makes CSS px larger than that.
-  const zoom = await chrome.tabs.getZoom(tabId).catch(() => 1);
+  const zoom = await api.tabs.getZoom(tabId).catch(() => 1);
   return { dataUrl: img.dataUrl, scale: tab.width / (zoom || 1) / img.width };
 }
 
@@ -441,14 +452,14 @@ async function withTransfer(tabId, blob, info, signal, fn) {
     for (let i = 0; i < n; i++) {
       signal?.throwIfAborted();
       const bytes = new Uint8Array(await blob.slice(i * CHUNK_BYTES, (i + 1) * CHUNK_BYTES).arrayBuffer());
-      const r = await inject(tabId, pageChunk, { key, index: i, b64: bytesToBase64(bytes) });
+      const r = await inject(tabId, 'pageChunk', { key, index: i, b64: bytesToBase64(bytes) });
       if (!r) throw new Error('No response from page.');
       if (r.error) throw new Error(r.error);
     }
     signal?.throwIfAborted();
     return await fn({ key, name: info.name, mime: info.mime, size: blob.size });
   } finally {
-    await Promise.race([inject(tabId, pageChunk, { op: 'drop', key }).catch(() => {}), sleep(DROP_MS)]);
+    await Promise.race([inject(tabId, 'pageChunk', { op: 'drop', key }).catch(() => {}), sleep(DROP_MS)]);
   }
 }
 
@@ -458,9 +469,9 @@ const downloadUrls = new Map(); // download id → release()
 let watchingDownloads = false;
 
 function watchDownloads() {
-  if (watchingDownloads || !chrome.downloads?.onChanged) return;
+  if (watchingDownloads) return;
   watchingDownloads = true;
-  chrome.downloads.onChanged.addListener((d) => {
+  api.events.on('downloads.changed', (d) => {
     const state = d.state?.current;
     if (state === 'complete' || state === 'interrupted') downloadUrls.get(d.id)?.();
   });
@@ -476,7 +487,7 @@ function revokeWhenDone(id, url) {
   timer = setTimeout(release, DOWNLOAD_URL_MS);
   downloadUrls.set(id, release);
   // It may have finished before we knew its id.
-  Promise.resolve(chrome.downloads.search?.({ id }))
+  Promise.resolve(api.downloads.search({ id }))
     .then((items) => {
       const st = items?.[0]?.state;
       if (st === 'complete' || st === 'interrupted') release();
@@ -700,7 +711,7 @@ export const TOOLS = [
     description: 'List open tabs with their ids.',
     parameters: obj({}),
     run: async (args, ctx) => {
-      const tabs = await chrome.tabs.query({});
+      const tabs = await api.tabs.query({});
       const multi = new Set(tabs.map((t) => t.windowId)).size > 1;
       return tabs
         .map((t) => {
@@ -716,7 +727,7 @@ export const TOOLS = [
     parameters: obj({ url: { type: 'string' }, background: { type: 'boolean', description: "Don't switch the user's view to it" } }, ['url']),
     run: async (args, ctx) => {
       const url = withScheme(args.url);
-      const t = await chrome.tabs.create({ url, active: !args.background, ...(ctx.windowId != null ? { windowId: ctx.windowId } : {}) });
+      const t = await api.tabs.create({ url, active: !args.background, ...(ctx.windowId != null ? { windowId: ctx.windowId } : {}) });
       ctx.tabId = t.id;
       await settle(t.id, 350, 20000, ctx.signal);
       return `Opened tab id=${t.id}${args.background ? ' in the background' : ''}; it is now the current tab.\n${await pageLine(t.id)}`;
@@ -732,7 +743,7 @@ export const TOOLS = [
       const query = String(args.query ?? '').trim();
       if (has(args.tab_id)) id = Number(args.tab_id);
       else if (query) {
-        const tabs = await chrome.tabs.query({});
+        const tabs = await api.tabs.query({});
         let hits = /^\d+$/.test(query) ? tabs.filter((t) => t.id === Number(query)) : [];
         if (!hits.length) hits = matchTabs(tabs, query);
         if (!hits.length) {
@@ -748,8 +759,8 @@ export const TOOLS = [
           others = `\n${hits.length - 1} other tab${hits.length > 2 ? 's' : ''} also matched (use tab_id to pick one):\n${rest.join('\n')}${hits.length > 11 ? '\n…' : ''}`;
         }
       } else throw new Error('Provide tab_id, or a query matching the tab title or URL.');
-      const t = await chrome.tabs.update(id, { active: true }).catch(rethrow);
-      if (t?.windowId != null && t.windowId !== ctx.windowId) await chrome.windows.update(t.windowId, { focused: true }).catch(() => {});
+      const t = await api.tabs.update(id, { active: true }).catch(rethrow);
+      if (t?.windowId != null && t.windowId !== ctx.windowId) await api.windows.update(t.windowId, { focused: true }).catch(() => {});
       ctx.tabId = id;
       return `Switched to tab id=${id}.\n${await pageLine(id)}${others}`;
     },
@@ -761,7 +772,7 @@ export const TOOLS = [
     mutating: () => true,
     run: async (args, ctx) => {
       const id = Number(args.tab_id);
-      await chrome.tabs.remove(id).catch(rethrow);
+      await api.tabs.remove(id).catch(rethrow);
       if (Number(ctx.tabId) === id) {
         ctx.tabId = null;
         return `Closed tab id=${id}. It was the current tab; page tools now use the active tab.`;
@@ -783,15 +794,15 @@ export const TOOLS = [
         async () => {
           if (action === 'back') {
             // Chrome refuses to go back to a tab's first page if nothing ever interacted with it; the page itself still can.
-            await chrome.tabs.goBack(tabId).catch(async (e) => {
-              if (!(await inject(tabId, () => history.length > 1 && (history.back(), true)))) rethrow(e);
+            await api.tabs.goBack(tabId).catch(async (e) => {
+              if (!(await inject(tabId, 'pageBack'))) rethrow(e);
             });
           }
-          else if (action === 'forward') await chrome.tabs.goForward(tabId).catch(rethrow);
-          else if (action === 'reload') await chrome.tabs.reload(tabId).catch(rethrow);
+          else if (action === 'forward') await api.tabs.goForward(tabId).catch(rethrow);
+          else if (action === 'reload') await api.tabs.reload(tabId).catch(rethrow);
           else {
             const url = withScheme(args.url);
-            await chrome.tabs.update(tabId, { url }).catch(rethrow);
+            await api.tabs.update(tabId, { url }).catch(rethrow);
             return `Navigated to ${url}.`;
           }
           return `Done: ${action}.`;
@@ -814,7 +825,7 @@ export const TOOLS = [
     run: async (args, ctx) => {
       const tabId = await tabOf(args, ctx);
       const filter = String(args.filter ?? '');
-      const r = await inject(tabId, pageRead, {
+      const r = await inject(tabId, 'pageRead', {
         offset: Math.max(0, Number(args.offset) || 0),
         maxChars: Math.min(Number(args.max_chars) || 12000, room(ctx)),
         filter,
@@ -840,7 +851,7 @@ export const TOOLS = [
       const xy = has(args.x) && has(args.y);
       const t = target(args, !xy);
       return acting(tabId, ctx, async () => {
-        if (ctx.settings.trustedInput) {
+        if (trusted(ctx)) {
           let x = Number(args.x);
           let y = Number(args.y);
           let desc = `point (${x}, ${y})`;
@@ -850,7 +861,7 @@ export const TOOLS = [
         }
         const where = t.id != null || t.selector ? t : { x: Number(args.x), y: Number(args.y) };
         const r = await act(tabId, { ...where, type: 'click', double: !!args.double });
-        return `Clicked ${r.desc}.`;
+        return `Clicked ${r.desc}.${untrustedNote(ctx)}`;
       });
     },
   },
@@ -867,7 +878,7 @@ export const TOOLS = [
       const enter = !!args.press_enter;
       return acting(tabId, ctx, async () => {
         let desc;
-        if (ctx.settings.trustedInput) {
+        if (trusted(ctx)) {
           desc = (await act(tabId, { ...t, type: 'focus', clear })).desc;
           if (text) await cdpInsertText(tabId, text);
           else if (clear) await cdpKey(tabId, 'Backspace');
@@ -875,7 +886,7 @@ export const TOOLS = [
         } else {
           desc = (await act(tabId, { ...t, type: 'type', text, clear, enter })).desc;
         }
-        return `Typed "${short(text)}" into ${desc}${enter ? ' and pressed Enter' : ''}.`;
+        return `Typed "${short(text)}" into ${desc}${enter ? ' and pressed Enter' : ''}.${untrustedNote(ctx)}`;
       });
     },
   },
@@ -904,13 +915,13 @@ export const TOOLS = [
       const { key, mods } = parseKey(args);
       const label = [...Object.keys(mods).filter((m) => mods[m]), key === ' ' ? 'Space' : key].join('+');
       return acting(tabId, ctx, async () => {
-        if (ctx.settings.trustedInput) {
+        if (trusted(ctx)) {
           let desc = 'the focused element';
           if (t.id != null || t.selector) desc = (await act(tabId, { ...t, type: 'focus', clear: false })).desc;
           await cdpKey(tabId, key, mods);
           return `Pressed ${label} on ${desc}.`;
         }
-        return `Pressed ${label} on ${(await act(tabId, { ...t, type: 'key', key, mods })).desc}.`;
+        return `Pressed ${label} on ${(await act(tabId, { ...t, type: 'key', key, mods })).desc}.${untrustedNote(ctx)}`;
       });
     },
   },
@@ -938,13 +949,13 @@ export const TOOLS = [
     run: async (args, ctx) => {
       const tabId = await tabOf(args, ctx);
       const t = target(args);
-      if (ctx.settings.trustedInput) {
+      if (trusted(ctx)) {
         // CSS :hover only reacts to real pointer movement.
         const r = await act(tabId, { ...t, type: 'locate' });
         await cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: r.x, y: r.y });
         return `Hovered over ${r.desc}.`;
       }
-      return `Hovered over ${(await act(tabId, { ...t, type: 'hover' })).desc}.`;
+      return `Hovered over ${(await act(tabId, { ...t, type: 'hover' })).desc}.${untrustedNote(ctx)}`;
     },
   },
   {
@@ -1004,8 +1015,13 @@ export const TOOLS = [
       const tabId = await tabOf(args, ctx);
       // A trailing ';' would stop `document.title;` from being evaluated as an expression.
       const code = String(args.code ?? '').replace(/;\s*$/, '');
-      let r = await inject(tabId, mainEval, code, 'MAIN');
-      if (r?.csp) r = await cdpEval(tabId, code);
+      let r = await inject(tabId, 'mainEval', code, 'MAIN');
+      if (r?.csp) {
+        if (!hasDebugger()) {
+          throw new Error(`This page's Content Security Policy blocks running JavaScript. The workaround used in Chrome is ${NO_DEBUGGER}. Use read_page, click, type_text and the other page tools instead.`);
+        }
+        r = await cdpEval(tabId, code);
+      }
       if (!r) throw new Error('No response from page.');
       if (r.error) throw new Error(r.error);
       return r.result ?? 'undefined';
@@ -1185,7 +1201,7 @@ export const TOOLS = [
       if (objectUrl) watchDownloads();
       let id;
       try {
-        id = await chrome.downloads.download({ url, ...(filename ? { filename } : {}) });
+        id = await api.downloads.download({ url, ...(filename ? { filename } : {}) });
       } catch (e) {
         if (objectUrl) URL.revokeObjectURL(objectUrl);
         throw e;

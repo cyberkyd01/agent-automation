@@ -1,3 +1,4 @@
+import { api } from './host/api.js';
 import { TOOLS, toDataUrl, modelImage, assetText } from './tools.js';
 import { chat } from './providers.js';
 import { McpPool, companionServer } from './mcp.js';
@@ -103,6 +104,19 @@ function parseArgs(s) {
   } catch {
     return null;
   }
+}
+
+// Tool replies that report an error (for the loop guard). Not part of the message, so never saved.
+const FAILED = new WeakSet();
+const LOOP_LIMIT = 3;
+const LOOP_NOTE = `\n\n[Note from Agent Automation: this exact call has now failed ${LOOP_LIMIT} times in a row. Do not repeat it unchanged — try a different approach (another tool, selector or URL), or ask the user how to proceed.]`;
+
+// name + arguments, with the keys in a fixed order so {"a":1,"b":2} and {"b":2,"a":1} count as the same call.
+function callKey(tc) {
+  const name = tc.function?.name || '';
+  const args = parseArgs(tc.function?.arguments);
+  const sort = (v) => (Array.isArray(v) ? v.map(sort) : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, sort(v[k])])) : v);
+  return `${name}\u0000${args ? JSON.stringify(sort(args)) : String(tc.function?.arguments ?? '')}`;
 }
 
 function isMutating(tool, args) {
@@ -268,11 +282,39 @@ export class Agent {
     this.assets.delete(String(id).trim().toLowerCase());
   }
 
+  // Name, MIME type, kind and a fresh id for a user attachment that another context (the panel) stores itself;
+  // it then hands the stored asset over with adoptAsset(). Throws a readable Error when it is too large.
+  reserveAsset({ name, mime, size }) {
+    name = String(name || '').split(/[\\/]/).pop().trim();
+    mime = String(mime || '').split(';')[0].trim().toLowerCase();
+    if (!mime || mime === 'application/octet-stream') mime = name ? guessMime(name, 'application/octet-stream') : 'application/octet-stream';
+    if (mime === 'image/jpg') mime = 'image/jpeg';
+    checkAttachSize(Number(size) || 0, name || 'The file');
+    const kind = isImageMime(mime) ? 'image' : 'file';
+    const id = kind === 'image' ? `img_${++this.counters.img}` : `file_${++this.counters.file}`;
+    return { id, kind, name: name || withExt(id, mime), mime, size: Number(size) || 0, label: 'attached', createdAt: Date.now() };
+  }
+
+  // Registers an asset that is already stored (with its Blob), without firing hooks.onAsset.
+  adoptAsset(a) {
+    const blob = assetBlob(a);
+    const id = String(a.id).toLowerCase();
+    const mime = a.mime || String(blob.type || '').split(';')[0] || 'application/octet-stream';
+    const asset = { ...a, id, kind: a.kind || (isImageMime(mime) ? 'image' : 'file'), mime, name: a.name || withExt(id, mime), size: a.size || blob.size, blob, label: a.label || '' };
+    delete asset.dataUrl;
+    const m = /^(img|file)_(\d+)$/.exec(id);
+    if (m) this.counters[m[1]] = Math.max(this.counters[m[1]], +m[2]);
+    this.assets.set(id, asset);
+    return asset;
+  }
+
   /* ----- running ----- */
 
+  // opts.keepTab: stay on the tab the previous run ended on. opts.windowId: the browser window to work in
+  // (the panel's); without it, the last focused one.
   async run(text, attachmentIds = [], settings, opts = {}) {
     return this.drive(settings, async (history, signal) => {
-      const { tab, kept } = await this.pickTab(!!opts.keepTab);
+      const { tab, kept } = await this.pickTab(!!opts.keepTab, opts.windowId);
       const where = tab ? `id=${tab.id} "${tab.title || ''}" ${tab.url || tab.pendingUrl || ''}` : 'none';
       const msg = await this.userMessage(text, attachmentIds, settings, signal, `${kept ? 'Current' : 'Active'} tab: ${where}`);
       this.edit(history, repair);
@@ -281,23 +323,24 @@ export class Agent {
   }
 
   // Continues after an error or a Stop without adding a user message.
-  async resume(settings) {
+  async resume(settings, opts = {}) {
     if (this.running) throw new Error('The agent is already running.');
     if (!this.canResume) throw new Error('There is nothing to resume — send a new message instead.');
     return this.drive(settings, async () => {
-      await this.pickTab(true);
+      await this.pickTab(true, opts.windowId);
     });
   }
 
   // keep: stay on the tab the previous run ended on, if it still exists.
-  async pickTab(keep) {
+  async pickTab(keep, windowId) {
     const ctx = this.ctx;
-    ctx.windowId = (await chrome.windows.getCurrent()).id;
+    const win = windowId != null ? await api.windows.get(Number(windowId)).catch(() => null) : null;
+    ctx.windowId = (win || (await api.windows.getLastFocused({ windowTypes: ['normal'] }).catch(() => null)) || (await api.windows.getCurrent()))?.id ?? null;
     if (keep && ctx.tabId != null) {
-      const t = await chrome.tabs.get(Number(ctx.tabId)).catch(() => null);
+      const t = await api.tabs.get(Number(ctx.tabId)).catch(() => null);
       if (t) return { tab: t, kept: true };
     }
-    const [tab] = await chrome.tabs.query({ active: true, windowId: ctx.windowId });
+    const [tab] = ctx.windowId != null ? await api.tabs.query({ active: true, windowId: ctx.windowId }) : await api.tabs.query({ active: true, lastFocusedWindow: true });
     ctx.tabId = tab?.id ?? null;
     return { tab, kept: false };
   }
@@ -384,7 +427,9 @@ export class Agent {
       const tools = [...TOOLS, ...extra];
       const byName = new Map(tools.map((t) => [t.name, t]));
       const system = systemPrompt(settings, { computer: extra.some((t) => t.sensitive) });
-      const maxSteps = Number(settings.maxSteps) || 40;
+      // 0 (the default) = no limit: a run ends when the model is done or the user presses Stop.
+      const maxSteps = Number(settings.maxSteps) > 0 ? Math.floor(Number(settings.maxSteps)) : Infinity;
+      const loop = { key: '', count: 0 };
 
       for (let step = 0; ; step++) {
         if (step >= maxSteps) {
@@ -426,6 +471,13 @@ export class Agent {
           const result = await this.callTool(tc, byName, settings, signal);
           // A newer run has taken over this history; leave the gap for repair() to fill.
           if (this.controller !== controller) throw signal.reason;
+          // Loop guard: the same failing call again and again gets a nudge; the run is never stopped for it.
+          if (FAILED.has(result)) {
+            const key = callKey(tc);
+            loop.count = key === loop.key ? loop.count + 1 : 1;
+            loop.key = key;
+            if (loop.count >= LOOP_LIMIT) result.content += LOOP_NOTE;
+          } else loop.count = 0;
           this.push(history, result);
         }
       }
@@ -516,17 +568,24 @@ export class Agent {
       return m;
     };
 
+    const failed = (content) => {
+      const m = reply(content);
+      FAILED.add(m);
+      return m;
+    };
+
     const args = parseArgs(tc.function?.arguments);
     if (!args) {
-      this.ui.toolStart(name, { arguments: tc.function?.arguments }).finish('Arguments were not valid JSON.', true);
-      return reply('Error: arguments were not valid JSON.');
+      this.ui.toolStart(name, { arguments: tc.function?.arguments }, tc.id).finish('Arguments were not valid JSON.', true);
+      return failed('Error: arguments were not valid JSON.');
     }
-    const card = this.ui.toolStart(name, args);
+    // The third argument (the call id) lets a UI tie the card to the call in the history.
+    const card = this.ui.toolStart(name, args, tc.id);
     // Some models prefix names ("functions.click").
     const tool = byName.get(name) || byName.get(name.split('.').pop());
     if (!tool) {
       card.finish(`Unknown tool "${name}".`, true);
-      return reply(`Error: unknown tool "${name}".`);
+      return failed(`Error: unknown tool "${name}".`);
     }
 
     try {
@@ -566,7 +625,7 @@ export class Agent {
       }
       const msg = e?.message || String(e);
       card.finish(msg, true);
-      return reply(`Error: ${msg}`);
+      return failed(`Error: ${msg}`);
     }
   }
 

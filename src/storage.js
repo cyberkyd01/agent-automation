@@ -1,3 +1,5 @@
+import { api } from './host/api.js';
+
 export const PRESETS = {
   lmstudio: { name: 'LM Studio', type: 'openai', baseUrl: 'http://localhost:1234/v1' },
   ollama: { name: 'Ollama', type: 'openai', baseUrl: 'http://localhost:11434/v1' },
@@ -23,7 +25,7 @@ export const DEFAULTS = {
   approval: 'ask', // ask | auto
   vision: 'auto', // auto | on | off
   toolMode: 'auto', // auto | native | prompt
-  maxSteps: 40,
+  maxSteps: 0, // model turns per prompt; 0 = no limit
   maxTokens: '',
   temperature: '',
   contextChars: 100000,
@@ -33,21 +35,30 @@ export const DEFAULTS = {
   // Local program that gives the agent OS tools; approval: 'ask' (always confirm its tools) | 'follow' (use `approval`).
   companion: { enabled: false, url: 'http://127.0.0.1:8765', token: '', approval: 'ask' },
   queueMode: 'auto', // auto (run queued prompts back to back) | step (pause after each)
+  notifications: true, // desktop notifications (approvals, finished/failed jobs) while the panel is closed
 };
 
+// v1.1 saved its default step limit (40) with every settings save; v1.2 has no limit unless the user sets one.
+const OLD_DEFAULT_STEPS = 40;
+
 export async function loadSettings() {
-  const { settings = {} } = await chrome.storage.local.get('settings');
+  const { settings = {} } = (await api.storage.local.get('settings')) || {};
   const base = structuredClone(DEFAULTS);
-  return {
+  const s = {
     ...base,
     ...settings,
     image: { ...base.image, ...settings.image },
     companion: { ...base.companion, ...settings.companion },
   };
+  if (!settings.stepsV12) {
+    if (Number(s.maxSteps) === OLD_DEFAULT_STEPS) s.maxSteps = 0;
+    s.stepsV12 = true;
+  }
+  return s;
 }
 
 export async function saveSettings(s) {
-  await chrome.storage.local.set({ settings: s });
+  await api.storage.local.set({ settings: s });
   await syncOriginRules(s);
 }
 
@@ -83,11 +94,11 @@ async function applyOriginRules(s) {
     id: i + 1,
     priority: 1,
     action: { type: 'modifyHeaders', requestHeaders: [{ header: 'Origin', operation: 'set', value }] },
-    condition: { urlFilter: `|${origin}/`, initiatorDomains: [chrome.runtime.id], resourceTypes: ['xmlhttprequest'] },
+    condition: { urlFilter: `|${origin}/`, initiatorDomains: [api.runtime.id], resourceTypes: ['xmlhttprequest'] },
   }));
   try {
-    const old = await chrome.declarativeNetRequest.getDynamicRules();
-    await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: old.map((r) => r.id), addRules });
+    const old = await api.declarativeNetRequest.getDynamicRules();
+    await api.declarativeNetRequest.updateDynamicRules({ removeRuleIds: old.map((r) => r.id), addRules });
   } catch (e) {
     console.warn('Origin rule sync failed', e);
   }

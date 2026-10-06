@@ -1,4 +1,5 @@
-/* Styles for the "Computer tools" and "Remote MCP servers" Settings sections (src/settings-tools-ui.js).
+/* Styles for the "Computer tools", "Remote access" and "Remote MCP servers" Settings sections and the Providers
+   "Add from connection code" form (src/settings-tools-ui.js).
    Loaded after sidepanel.css: reuses its tokens and the .btn / .field / .card / .hint / .test-result classes,
    and only adds what is new. */
 
@@ -385,12 +386,14 @@ textarea.ctl[aria-invalid='true']:focus {
   color: var(--ok);
 }
 
-.badge.starting {
+.badge.starting,
+.badge.downloading {
   background: var(--accent-soft);
   color: var(--link);
 }
 
-.badge.starting::before {
+.badge.starting::before,
+.badge.downloading::before {
   animation: blink 1.2s ease-in-out infinite;
 }
 
@@ -489,4 +492,274 @@ textarea.ctl[aria-invalid='true']:focus {
 
 .mcp-tool-desc {
   color: var(--muted);
+}
+
+/* ---------- providers: add from connection code ---------- */
+
+.provider-add {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.provider-add > .add-select {
+  flex: 1 1 150px;
+  width: auto;
+  min-width: 0;
+}
+
+.provider-add > .btn {
+  flex: none;
+}
+
+.provider-code {
+  margin-top: 8px;
+}
+
+/* ---------- desktop tools ---------- */
+
+.tools-desktop {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.tools-desktop-env {
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.desktop-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.desktop-chip {
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+  font: 11.5px/1.6 var(--mono);
+  overflow-wrap: anywhere;
+}
+
+.desktop-missing {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.desktop-missing-item {
+  min-width: 0;
+}
+
+.desktop-missing-name {
+  font: 600 12px/1.4 var(--mono);
+  overflow-wrap: anywhere;
+}
+
+.desktop-missing-item > .codeblock {
+  margin-top: 3px;
+}
+
+/* ---------- remote access ---------- */
+
+.set-section > .hint.tunnel-off {
+  margin: 0;
+}
+
+.tunnel-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.tunnel-intro {
+  margin: 0;
+}
+
+.tunnel-safety {
+  padding: 8px 10px;
+  border: 1px solid var(--warn-border);
+  border-radius: 6px;
+  background: var(--warn-bg);
+  color: var(--warn);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.tunnel-safety p {
+  margin: 0;
+}
+
+.tunnel-safety p + p {
+  margin-top: 6px;
+}
+
+.tunnel-state {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 4px 8px;
+  min-width: 0;
+}
+
+.tunnel-state-text {
+  flex: 1 1 140px;
+  min-width: 0;
+  max-height: 96px;
+  overflow: auto;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+}
+
+.tunnel-state.is-error .tunnel-state-text {
+  color: var(--err);
+  white-space: pre-line; /* the reason, "Restarting in …" and cloudflared's last lines each on their own line */
+}
+
+.tunnel-body > .tunnel-cf {
+  margin: -6px 0 0;
+}
+
+.tunnel-block {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.tunnel-block > .codeblock {
+  margin-top: 0;
+}
+
+.tunnel-block > .hint {
+  margin: 0;
+}
+
+.codeblock.wrap {
+  flex-wrap: wrap;
+}
+
+.codeblock.wrap > .codeblock-text {
+  flex: 1 1 100%;
+  max-height: 120px;
+  overflow: auto;
+}
+
+.codeblock-btns {
+  display: flex;
+  gap: 6px;
+}
+
+.codeblock-btns > .btn {
+  min-width: 56px;
+}
+
+.tunnel-opts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.tunnel-upstreams {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.tunnel-upstreams > .hint {
+  margin: 0;
+}
+
+.tunnel-upstream-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tunnel-upstream {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.tunnel-upstream:hover {
+  background: var(--surface-2);
+}
+
+.tunnel-upstream > input {
+  flex: none;
+  margin: 2px 0 0;
+}
+
+.tunnel-upstream-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.tunnel-upstream-name {
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.tunnel-upstream-url {
+  color: var(--muted);
+  font: 11.5px/1.4 var(--mono);
+  overflow-wrap: anywhere;
+}
+
+.tunnel-advanced-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.tunnel-advanced-body > .hint {
+  margin: 0;
+}
+
+.tunnel-token-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+
+.tunnel-token-saved {
+  color: var(--ok);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.tunnel-advanced > summary {
+  color: var(--muted);
+}
+
+.tunnel-body > .tunnel-code-wait {
+  margin: -6px 0 0;
+}
+
+.tunnel-block > .tunnel-code-note {
+  margin-top: 3px;
 }

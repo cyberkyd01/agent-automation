@@ -1,8 +1,8 @@
 # Agent Automation user guide
 
-Agent Automation is an AI agent that lives in Chrome's side panel and works on the website next to it. You describe a job in plain words, and it reads the page, clicks, types, fills in forms, replies to messages, repeats a change across many rows, researches in other tabs, handles files and images, and, with an optional companion program, uses tools on your own computer.
+Agent Automation is an AI agent that lives in your browser's side panel and works on the website next to it. You describe a job in plain words, and it reads the page, clicks, types, fills in forms, replies to messages, repeats a change across many rows, researches in other tabs, handles files and images, and, with an optional companion program, uses tools on your own computer and can share your local models with another browser.
 
-This guide is for people who run websites or online shops. It explains how to get work done with the agent. The [README](../README.md) is the short overview and has the install steps; this guide goes through the panel, the recipes, every setting and what to do when something goes wrong. It describes version 1.1.
+This guide is for people who run websites or online shops. It explains how to get work done with the agent. The [README](../README.md) is the short overview and has the install steps; this guide goes through the panel, the recipes, every setting and what to do when something goes wrong. It describes version 1.2.
 
 Jump to the section you need. If you are new, read [Before you start](#before-you-start), [A tour of the panel](#a-tour-of-the-panel) and [Working with the agent](#working-with-the-agent) first, then try one recipe.
 
@@ -11,6 +11,7 @@ Jump to the section you need. If you are new, read [Before you start](#before-yo
 - [Before you start](#before-you-start)
   - [What you need](#what-you-need)
   - [Install](#install)
+  - [Firefox notes](#firefox-notes)
   - [Connect a model](#connect-a-model)
   - [Local models: set the context window](#local-models-set-the-context-window)
   - [Your first task](#your-first-task)
@@ -20,12 +21,14 @@ Jump to the section you need. If you are new, read [Before you start](#before-yo
   - [The chat area](#the-chat-area)
   - [The composer](#the-composer)
   - [The queue bar](#the-queue-bar)
+  - [The toolbar icon](#the-toolbar-icon)
 - [Working with the agent](#working-with-the-agent)
   - [Write a good task](#write-a-good-task)
   - [Which page the agent works on](#which-page-the-agent-works-on)
   - [Approvals](#approvals)
   - [Stop, Retry and Continue](#stop-retry-and-continue)
-  - [Long tasks and the step limit](#long-tasks-and-the-step-limit)
+  - [Closing the panel](#closing-the-panel)
+  - [Long tasks](#long-tasks)
 - [Recipes](#recipes)
   - [Summarise and analyse a page](#summarise-and-analyse-a-page)
   - [Fill in a form](#fill-in-a-form)
@@ -56,11 +59,13 @@ Jump to the section you need. If you are new, read [Before you start](#before-yo
   - [Web and research](#web-and-research)
   - [Files and images](#files-and-images)
   - [Computer tools (companion)](#computer-tools-companion)
+  - [Desktop tools (companion)](#desktop-tools-companion)
   - [MCP tools](#mcp-tools)
 - [Settings reference](#settings-reference)
   - [Providers](#providers)
   - [Image generation](#image-generation)
   - [Computer tools settings](#computer-tools-settings)
+  - [Remote access settings](#remote-access-settings)
   - [Remote MCP servers](#remote-mcp-servers)
   - [Behaviour](#behaviour)
   - [About](#about)
@@ -69,9 +74,17 @@ Jump to the section you need. If you are new, read [Before you start](#before-yo
   - [Set up and the token](#set-up-and-the-token)
   - [Start at login](#start-at-login)
   - [Allow shell commands and Allow writing files](#allow-shell-commands-and-allow-writing-files)
+  - [Desktop tools](#desktop-tools)
   - [Local MCP servers](#local-mcp-servers)
   - [Approval behaviour](#approval-behaviour)
   - [Limits](#limits)
+- [Remote access](#remote-access)
+  - [What it is for](#what-it-is-for)
+  - [Set it up, step by step](#set-it-up-step-by-step)
+  - [What the other browser can reach](#what-the-other-browser-can-reach)
+  - [Staying safe](#staying-safe)
+  - [Limits of remote access](#limits-of-remote-access)
+  - [Named tunnels](#named-tunnels)
 - [Safety and privacy](#safety-and-privacy)
   - [What is stored where](#what-is-stored-where)
   - [What leaves your computer](#what-leaves-your-computer)
@@ -86,6 +99,10 @@ Jump to the section you need. If you are new, read [Before you start](#before-yo
   - [Files](#files)
   - [Chats and storage](#chats-and-storage)
   - [Computer tools problems](#computer-tools-problems)
+  - [Desktop tools problems](#desktop-tools-problems)
+  - [Remote access problems](#remote-access-problems)
+  - [Background runs and notifications](#background-runs-and-notifications)
+  - [Firefox problems](#firefox-problems)
   - [FAQ](#faq)
 - [Keyboard shortcuts](#keyboard-shortcuts)
 
@@ -93,13 +110,33 @@ Jump to the section you need. If you are new, read [Before you start](#before-yo
 
 ### What you need
 
-- **Chrome 116 or later.** The extension uses Chrome's side panel.
+- **A browser.** Chrome 116 or later, a Chromium-based browser of the same age (Chromium, Edge, Brave, Opera), or Firefox 128 or later. The extension uses the browser's side panel (in Firefox, the sidebar). Firefox has a few limits: see [Firefox notes](#firefox-notes).
 - **A model to talk to.** The "model" is the AI that does the thinking. It can run on your own computer (LM Studio or Ollama, free to use, and nothing leaves your machine) or in the cloud (OpenAI, Anthropic, Google Gemini and others, usually paid per use, and the text of the page the agent reads is sent to that company).
-- **For computer tools only:** [Node.js](https://nodejs.org) 18 or later, to run the small companion program. Everything else works without it.
+- **For computer tools, desktop tools and remote access only:** [Node.js](https://nodejs.org) 18 or later, to run the small companion program. Everything else works without it.
 
 ### Install
 
-Follow the [Install section of the README](../README.md#install). In short: download the release zip, open `chrome://extensions`, turn on **Developer mode**, drag the zip onto the page, pin the extension, and click its icon (or press **Ctrl+Shift+Y**, on a Mac **Cmd+Shift+Y**) to open the side panel.
+Follow the [Install section of the README](../README.md#install). In short, for Chrome and other Chromium-based browsers: download the zip for your browser from the release page (the Chrome zip for Chrome, the Chromium zip for Chromium, Edge, Brave and Opera), open the browser's extensions page (`chrome://extensions` in Chrome), turn on **Developer mode**, drag the zip onto the page, pin the extension, and click its icon (or press **Ctrl+Shift+Y**, on a Mac **Cmd+Shift+Y**) to open the side panel. For Firefox, see the next section.
+
+### Firefox notes
+
+Firefox needs a different install and has a few differences. You need Firefox 128 or later.
+
+1. Download the `.xpi` from the release page, open `about:debugging#/runtime/this-firefox`, click **Load Temporary Add-on…** and pick the `.xpi`. (If you built the extension from source, pick `manifest.json` in `dist/firefox`.) The sidebar opens by itself.
+2. The toolbar button, or **Ctrl+Shift+Y** (Mac: **Cmd+Shift+Y**), opens and closes the sidebar. If the shortcut does nothing, set another one in `about:addons` (gear menu, **Manage Extension Shortcuts**).
+3. Firefox treats site access as optional. If it is off (you can see it in `about:addons` → Agent Automation → **Permissions**), the panel shows an **Allow access** banner. Click it. Without that access the agent cannot read or act on pages.
+
+**A temporary add-on is removed when Firefox quits**, so you repeat step 1 each time you start Firefox. Release and Beta Firefox refuse unsigned add-ons permanently, and they ignore the setting that would allow them. Two ways around that:
+
+- Use Firefox Developer Edition, Nightly or ESR. Set `xpinstall.signatures.required` to `false` in `about:config`, then open `about:addons`, click the gear and choose **Install Add-on From File…**, and pick the `.xpi`.
+- Sign your own copy through Mozilla's add-on service. Create API keys at addons.mozilla.org → Developer Hub → **Manage API Keys**, then run `npx web-ext sign --source-dir dist/firefox --channel unlisted --api-key <JWT issuer> --api-secret <JWT secret>`. Release Firefox installs the signed `.xpi` it gives back.
+
+What is different in Firefox:
+
+- **Trusted input events** (Settings → Behaviour) is not available, and neither is the fallback for pages whose security policy blocks scripts. Both need Chrome's debugger API.
+- Approval notifications have no **Allow** and **Deny** buttons. Clicking a notification opens the panel in a browser tab (not the sidebar), on the chat that needs an answer. See [Closing the panel](#closing-the-panel).
+- In Firefox 128 to 151, the `screenshot` tool only works on a tab where you clicked the toolbar button or pressed the shortcut. From Firefox 152 it works on every tab. If a screenshot fails, click the toolbar button while that tab is shown and ask again, or ask the agent to read the page as text.
+- The Firefox build declares to Firefox that it collects no data.
 
 ### Connect a model
 
@@ -154,7 +191,7 @@ A line of text can appear under the header: loading messages, or problems such a
 
 ### Chat tabs
 
-Each chat is a tab under the header. A **+** button starts another chat; the **×** on a tab closes it (the chat stays in History). Each chat has its own conversation, files and queue, and chats can work at the same time. See [Chats, tabs and history](#chats-tabs-and-history).
+Each chat is a tab under the header. A **+** button starts another chat; the **×** on a tab closes it (the chat stays in History). Each chat has its own conversation, files and queue, and chats can work at the same time. The open tabs are the same in every browser window. See [Chats, tabs and history](#chats-tabs-and-history).
 
 A small mark at the left of a tab shows its state:
 
@@ -164,7 +201,6 @@ A small mark at the left of a tab shows its state:
 | Solid blue dot | New output arrived while you were looking at another tab. |
 | Pulsing blue dot | The chat is waiting for your approval. |
 | Solid red dot | The chat could not be saved. |
-| Title in italics | The chat is open in another Chrome window and is read-only here. |
 
 ### The chat area
 
@@ -193,7 +229,7 @@ The composer is the box at the bottom.
 - **Approval mode** (the list at the bottom left). **Ask before acting** (the default) pauses for your OK before actions that change something. **Act without asking** does not. It is the same setting as Settings → Behaviour → Approval. See [Approvals](#approvals).
 - **Attach files** (paperclip). Pick any files; see [Attaching files](#attaching-files). You can also drag files onto the panel.
 - **Batch jobs** (list icon). Queues many similar jobs at once; see [Batch jobs](#batch-jobs).
-- **The tab indicator.** The small title (with the site's icon) shows which browser tab the agent will work on: the tab that is active in Chrome. Hover over it to see the full title and address. See [Which page the agent works on](#which-page-the-agent-works-on).
+- **The tab indicator.** The small title (with the site's icon) shows which browser tab the agent will work on: the tab that is active in the browser. Hover over it to see the full title and address. See [Which page the agent works on](#which-page-the-agent-works-on).
 - **Send.** Sends the message. While the agent is working, the button reads **Queue** and the message is added to the queue instead. It stays greyed out while the box is empty or a file is still being read.
 - **Stop.** Appears while the agent is working. Press it, or press **Esc**, to stop the run at once.
 
@@ -202,6 +238,13 @@ The composer is the box at the bottom.
 The queue bar appears above the message box when prompts are waiting. Click its first line to expand it. It is covered in [The queue](#the-queue).
 
 <img src="images/queue-bar.png" alt="A chat that is still working with the queue bar expanded: '3 queued · Run all', the mode selector, three numbered prompts with move up, move down, edit and remove buttons, and Stop and Queue buttons in the composer." width="400">
+
+### The toolbar icon
+
+The extension's icon in the browser toolbar opens the panel, and clicking it again hides the panel. Hiding the panel does not stop the agent: see [Closing the panel](#closing-the-panel).
+
+- While chats are running, the icon shows a **badge** with the number of running chats. The badge is blue, and turns amber while a chat is waiting for your approval.
+- Hover over the icon to read a tooltip such as "Agent Automation — 2 chats working, waiting for your approval".
 
 ## Working with the agent
 
@@ -233,8 +276,9 @@ When you send a message, the agent works on the **active browser tab** at that m
 
 - To work on another tab, switch to it before you send, or name it: "Switch to the Orders tab and list the unpaid orders." The agent can find a tab by words in its title or address ("the orders tab", "the tab with shop.example.com").
 - To work with two tabs, say so: "Read the supplier price list in the other tab, then update the prices on this page."
-- Queued and batch jobs keep working in the tab where the previous job ended, even if you click around in Chrome meanwhile.
+- Queued and batch jobs keep working in the tab where the previous job ended, even if you click around in the browser meanwhile.
 - If you run several chats at once, give each its own browser tab; two agents clicking in the same tab get in each other's way.
+- If you close or hide the panel, the agent carries on in the same tab. See [Closing the panel](#closing-the-panel).
 - Chrome's own pages (`chrome://…`), the Chrome Web Store and Chrome's built-in PDF viewer cannot be automated. Ask the agent to open a normal web page instead.
 
 ### Approvals
@@ -247,6 +291,8 @@ In **Ask before acting** mode the agent asks before any action that changes some
 - **Allow all (this chat)** runs this action and every other one in this chat without asking until you close the chat or change the approval mode. Use it after you have checked the first few actions of a bulk job.
 - **Deny** cancels the action. The agent is told not to try it again and to ask you what to do instead.
 
+If the panel is closed, the question arrives as a desktop notification instead; see [When an approval is needed](#when-an-approval-is-needed) below.
+
 The agent asks for these actions: `click`, `type_text`, `select_option`, `press_key`, `run_javascript`, `close_tab`, `upload_file` and `download`, and `fetch_url` when the request is not a plain read (anything except GET or HEAD). It does not ask before reading a page, scrolling, hovering, waiting, taking a screenshot, searching the web, opening or switching tabs, going to a web address, or creating and previewing images. Tools from remote MCP servers ask too, unless the server marks a tool as read-only. The complete list, tool by tool, is in the [Tool reference](#tool-reference).
 
 **Computer tools are stricter.** Tools that act on your computer ask every time, even in **Act without asking** mode. Their card also shows "Caution: this tool acts on your computer, outside the browser.", and the middle button reads **Always allow this tool (this chat)**, which stops the questions for that one tool only. You can change this in Settings → Computer tools → Approval, but the default is the safe choice. See [Approval behaviour](#approval-behaviour).
@@ -255,19 +301,55 @@ The agent asks for these actions: `click`, `type_text`, `select_option`, `press_
 
 **Act without asking** removes the approval cards for browser actions. Use it only for jobs you have already tested, on sites you trust. Changing the approval mode also resets any "Allow all (this chat)" you gave earlier.
 
+#### When an approval is needed
+
+An agent that waits for your answer waits as long as it has to. With the panel open, you answer on the approval card. With the panel closed (or hidden), the question arrives as a desktop notification:
+
+- The notification is titled **Allow this action?**, or **Allow this action on your computer?** for a computer tool. It names the tool with a short summary of its input and shows the chat's title.
+- It has **Allow** and **Deny** buttons (Chrome and Chromium-based browsers). They do the same as the buttons on the card. There is no **Allow all (this chat)** or **Always allow this tool (this chat)** on a notification; open the panel for those.
+- Click the notification itself to open the panel on that chat and read the whole input before you decide.
+- The notification asks to stay on screen until you answer. If you miss it, the question is still waiting in the panel, and the toolbar badge turns amber.
+- In Firefox, notifications have no buttons. Click the notification to open the panel in a browser tab, on the chat that needs an answer, and answer on the card there.
+
+Notifications only appear while no panel is open in any browser window, and only when Settings → Behaviour → **Desktop notifications** is on. See [Closing the panel](#closing-the-panel).
+
 ### Stop, Retry and Continue
 
-- **Stop** (the button, or **Esc** when no settings or history screen is open) ends the current run immediately. The chat shows "Stopped." with a **Continue** button that picks up where the agent left off. You can also just type a new instruction.
+- **Stop** (the button, or **Esc** when no settings or history screen is open) ends the current run immediately. The chat shows "Stopped." with a **Continue** button that picks up where the agent left off. You can also just type a new instruction. Stop is yours alone: the agent never stops itself for being stuck. A stopped run sends no notification.
 - **Retry** appears with an error message, for example when the model server stopped answering. It sends the same request again without adding a message. Short connection problems are retried automatically (up to two times), so a brief network hiccup does not end a long job.
-- **Continue** also appears next to the notice "This chat was interrupted." when you reopen a chat whose run was cut off, for example because the panel was closed. A run only goes on while the side panel is open.
+- **Continue** also appears next to the notice "This chat was interrupted." when you reopen a chat whose run was cut off. That happens when the browser was closed, or when the extension was reloaded, updated or restarted while the chat was working. Closing or hiding the panel does not cut a run off.
 - If a run fails right at the start, your message stays in the chat and **Retry** sends it again. If a message cannot even be added (for example a file could not be read), it goes back into the message box so you do not lose it.
 - Stop and errors also pause the queue; see [The queue](#the-queue).
 
-### Long tasks and the step limit
+### Closing the panel
 
-Each time the agent asks the model what to do next is one "step". **Max steps** (Settings → Behaviour, default 40) limits the steps per request. When the limit is reached, the chat shows `Step limit reached (40). Send "continue" to keep going.` Type `continue` and press Enter, and the agent carries on with another round of steps.
+The agent does not live in the panel. It runs in a background part of the extension, and the panel only shows what it is doing. So closing or hiding the panel (clicking the toolbar icon toggles it) does not stop a job, and you can browse, switch windows or work in another program while it carries on. It keeps working in the browser tab it started on.
 
-Large jobs may need many steps. Either raise **Max steps** (up to 1000), or split the work: ask for 20 rows at a time, or use [Batch jobs](#batch-jobs), where every job gets its own step budget.
+- **Badge.** While chats are running, the toolbar icon shows the number of running chats; see [The toolbar icon](#the-toolbar-icon).
+- **Approvals.** With the panel closed, an approval request appears as a desktop notification with **Allow** and **Deny** buttons (Chrome). See [When an approval is needed](#when-an-approval-is-needed).
+- **Finished and failed jobs** send a notification too: **Job finished**, with the first part of the answer (and how many queued prompts are waiting), or **Job failed**, with the error. A job you stopped yourself sends none, and neither does a job that is followed by a queued prompt that starts straight away.
+- **Clicking a notification** opens the panel on that chat.
+- **Settings → Behaviour → Desktop notifications** (on by default) switches all of these notifications off. The badge stays.
+- **Firefox:** notifications have no buttons. Click one to open the panel in a browser tab, on the chat that needs an answer.
+
+What still ends a run: closing the browser, and reloading, updating or restarting the extension. The chat is kept; when you reopen it, it shows "This chat was interrupted." with a **Continue** button, and its queue waits for you to press **Resume**.
+
+To stop a run while the panel is closed, open the panel and press **Stop**.
+
+### Long tasks
+
+Each time the agent asks the model what to do next is one "step". By default there is **no limit**: a run ends when the model has finished the task, or when you press **Stop**. A job over hundreds of rows can therefore run for a long time without you having to type "continue".
+
+**The loop guard.** Sometimes a model gets stuck and repeats the same action again and again. When the same tool, with the same input, has failed three times in a row, the agent adds a note to the result that tells the model to change its approach (another tool, another element or address) or to ask you. The guard only advises. It never stops the run, and it cannot tell that a run is going nowhere in other ways, so check on long jobs now and then and use **Stop** when you see it circling.
+
+**Putting a cap on it.** Set **Max steps per prompt** (Settings → Behaviour) to a number to limit the steps for each request. `0` means no limit. When a run reaches the cap, the chat shows `Step limit reached (40). Send "continue" to keep going.` (with your number), and you type `continue` and press Enter for another round. A cap is worth setting when:
+
+- you use a paid cloud model and leave jobs running unattended, because every step is a paid request;
+- you run a long job with the panel closed, where nobody would notice a stuck run.
+
+Upgrading from version 1.1: if **Max steps** still had the old default of 40, it was changed to 0 once, the first time the new version started. If you had set a different number, it was kept. If you want exactly 40 again, enter it.
+
+You can also split big work yourself: ask for 20 rows at a time, or use [Batch jobs](#batch-jobs), where every job is its own request.
 
 ## Recipes
 
@@ -304,7 +386,7 @@ Check the first result. Then:
 
 > That is right. Continue with the rest and give me a summary at the end: how many you changed and anything you skipped.
 
-For a long list, expect many approvals. Once you trust the result, click **Allow all (this chat)**. A job with hundreds of rows will hit the [step limit](#long-tasks-and-the-step-limit): raise **Max steps**, or work in pages of 20 to 50 rows. When every row needs a different page (for example one product page per item), use [Batch jobs](#batch-jobs).
+For a long list, expect many approvals. Once you trust the result, click **Allow all (this chat)**. There is no step limit by default (see [Long tasks](#long-tasks)), but a job with hundreds of rows still runs for a long time, and a mistake repeats on every row. Work in pages of 20 to 50 rows, or use [Batch jobs](#batch-jobs) when every row needs a different page (for example one product page per item).
 
 ### Extract data from a page
 
@@ -318,7 +400,7 @@ To get a file instead of text, ask "download it as orders.csv". Capable models c
 
 > Find three other shops that sell the Northwind desk lamp. Compare price, delivery cost and return period with ours in a table, with the web address of each.
 
-The agent searches the web, opens or fetches pages, reads them, and compares. Tabs it opens are visible in Chrome; it can open them in the background so your page stays in view. It cites addresses so you can check. The web search uses the DuckDuckGo and Bing result pages through your browser. If both refuse automated requests, the agent opens a search page in a tab and reads that instead. Treat prices and claims from other sites as leads to check, not as facts.
+The agent searches the web, opens or fetches pages, reads them, and compares. Tabs it opens are visible in the browser; it can open them in the background so your page stays in view. It cites addresses so you can check. The web search uses the DuckDuckGo and Bing result pages through your browser. If both refuse automated requests, the agent opens a search page in a tab and reads that instead. Treat prices and claims from other sites as leads to check, not as facts.
 
 ### Work across several tabs
 
@@ -374,13 +456,17 @@ These recipes need [Computer tools](#computer-tools-in-depth) to be set up. Ever
 
 The agent runs commands, lists folders, finds files, reads and writes files, and uses your clipboard. Files it reads from your computer (up to 20 MB each) become file cards in the chat, and it can then upload them to a page. Paths may start with `~` for your home folder; relative paths start from your home folder too.
 
+On Linux and macOS, the [desktop tools](#desktop-tools) also let it work with programs outside the browser:
+
+> Open the text editor, type the list above into it, and take a screenshot of the screen.
+
 ## Chats, tabs and history
 
 ### Chat tabs and several chats at once
 
 - Click **+** for a new chat. To rename a chat, double-click its tab, or select the tab and press **F2**; Enter saves the name and Esc cancels.
 - Closing a tab never deletes the chat; it stays in History. If the chat is still working, the tab first changes to "Stop and close" and a second click stops the run and closes the tab. If you do nothing for five seconds it changes back.
-- Chats are independent. One can work while you read or start another. A tab shows a spinning ring while its chat is working and a dot when something new arrived (see [Chat tabs](#chat-tabs)).
+- Chats are independent. One can work while you read or start another, with the panel open or closed. A tab shows a spinning ring while its chat is working and a dot when something new arrived (see [Chat tabs](#chat-tabs)).
 - Chats that work at the same time should use different browser tabs.
 
 <img src="images/history.png" alt="The History screen listing six saved chats with their titles, age, site and message count. One chat's menu is open showing Open, Rename, Export, Export Markdown and Delete." width="400">
@@ -389,9 +475,10 @@ The agent runs commands, lists folders, finds files, reads and writes files, and
 
 Every chat is saved automatically on this computer as you go, including its messages, its queue and its attached and generated files. A brand-new chat appears in History after you send your first message. When you close and reopen the side panel, the chats that were open come back, with the same tab active.
 
-- A run stops when you close the panel. Open the chat and use **Continue** ("This chat was interrupted.") to carry on.
+- Closing the panel does not stop a run; the chat goes on working in the background, and you see where it has got to when you reopen the panel. See [Closing the panel](#closing-the-panel).
+- A run does end when the browser closes, or when the extension is reloaded or updated. Open the chat and use **Continue** ("This chat was interrupted.") to carry on.
 - A queue that was saved with a chat never starts by itself when you reopen the chat. It waits for you to press **Resume**.
-- A chat can be open in only one Chrome window at a time. If you open the panel in a second window, chats that are open in the first window are not restored there. If you open one from History anyway, it is read-only: the message box says "Read-only: this chat is open in another window", and a banner explains it, with an **Open a copy** button. When the other window closes the chat, it becomes editable here.
+- The open chat tabs are the same in every browser window. If you open the panel in a second window, you see the same tabs and the same running chats.
 - If you used version 1.0, its single saved chat is moved into History automatically.
 - If saving fails (for example because the disk is full), a red banner says "Could not save this chat" with a **Retry** button, and the tab gets a red dot. If you try to close a chat that could not be saved, it stays open instead, and the banner offers **Close without saving**.
 
@@ -402,7 +489,7 @@ Open History with the clock icon in the header.
 - **Search chats** looks in each chat's title, its first message, and the address and title of the page it started on.
 - Tick **This site** to show only chats that were started on the website in your current browser tab. It is greyed out when the active tab is not a web page.
 - Each row shows the title, how long ago the chat was last used, the site, and the number of messages. A chat that is already open shows an "In a tab" badge. Click a row to open the chat, from any web page, and continue it where it stopped.
-- The **…** button on a row shows **Open**, **Rename**, **Export**, **Export Markdown** and **Delete**. **Delete** needs a second click ("Confirm delete") and removes the chat and its files for good. A chat that is open in another window can be neither renamed nor deleted until that window closes it.
+- The **…** button on a row shows **Open**, **Rename**, **Export**, **Export Markdown** and **Delete**. **Delete** needs a second click ("Confirm delete") and removes the chat and its files for good.
 - If there are many chats, use **Show more**.
 
 Chats get their title from your first message. Rename a chat to something you will recognise later.
@@ -440,7 +527,7 @@ Use batch jobs for the same task on many items: product pages, order numbers, cu
 3. Under **When a job finishes**, choose **Run all** or **One at a time**.
 4. Check the preview, which shows the number of jobs and the first prompt, then click **Add 5 jobs to queue** (the button shows the real number). In the Items box, **Ctrl+Enter** (Mac: **Cmd+Enter**) does the same.
 
-If the chat is idle, the first job starts right away. All the jobs go into the same chat, one after the other. Each job is a separate request with its own step budget, so a long list does not run into the [step limit](#long-tasks-and-the-step-limit). Batch jobs cannot carry attached files.
+If the chat is idle, the first job starts right away. All the jobs go into the same chat, one after the other. Each job is a separate request, so a long list is not one endless run. If you have set a step limit under [Long tasks](#long-tasks), every job gets its own budget. Batch jobs cannot carry attached files.
 
 Because all jobs share one chat, older results are dropped from the model's memory when the chat gets long (see **Context budget** under [Behaviour](#behaviour)). Each job should therefore be self-contained: say everything it needs in the instruction.
 
@@ -551,7 +638,7 @@ The agent works by calling tools: small, named abilities. You do not call them y
 
 ### Computer tools (companion)
 
-These tools only exist when the companion is connected (Settings → Computer tools). On the tool cards their names start with `mcp_computer_`, for example `mcp_computer_run_command`.
+These tools only exist when the companion is connected (Settings → Computer tools). On the tool cards their names start with `mcp_computer_`, for example `mcp_computer_run_command`. The tools for apps, windows and the screen are in the next table.
 
 By default they **always ask** for approval, even in **Act without asking** mode. In the table, "Always" means that; see [Approval behaviour](#approval-behaviour) for how to change it.
 
@@ -567,6 +654,23 @@ By default they **always ask** for approval, even in **Act without asking** mode
 | `clipboard_write` | Replaces the text on your clipboard. | Always | "Copy that reply to my clipboard." |
 | `system_info` | Describes the computer: system, user name, folders, free memory and disk space, time. | Always | "How much disk space do I have left?" |
 
+### Desktop tools (companion)
+
+These work with other programs on your screen, not only the browser. They exist when the companion is connected on **Linux or macOS**, and **Desktop tools** is switched on in Settings → Computer tools. Windows has no desktop tools yet. Their names start with `mcp_computer_` too, for example `mcp_computer_launch_app`. Which of them work on your computer depends on what is installed: see [Desktop tools](#desktop-tools).
+
+| Tool | What it does | Asks? | Example request |
+|---|---|---|---|
+| `list_apps` | Lists the installed applications (from the desktop menu on Linux, from the Applications folders on macOS). Can be narrowed to names containing some text. | Always | "Which image editors are installed?" |
+| `launch_app` | Starts an application by the name `list_apps` shows, or by its path, optionally with files or web addresses to open. It keeps running if the companion stops. | Always | "Open the text editor." |
+| `list_windows` | Lists the open windows with an id and a title (on macOS also the app). Not offered on most Wayland desktops. | Always | "Which windows are open?" |
+| `focus_window` | Brings a window to the front and gives it the keyboard. Finds it by id, title or part of the title. | Always | "Switch to the Calculator window." |
+| `close_window` | Closes a window as if you clicked its close button. The app may ask to save first. | Always | "Close the Notes window." |
+| `desktop_screenshot` | Takes a picture of the whole screen, not only the browser, scaled down to at most 1600 pixels wide. Needs a vision model to be read. | Always | "Take a screenshot of my desktop and tell me what is open." |
+| `send_keys` | Presses keys or shortcuts such as `ctrl+s`, `alt+F4`, `Return` or `ctrl+a ctrl+c` in the focused window, or in a window it focuses first. On macOS shortcuts use `cmd`, for example `cmd+s`. | Always | "Press ctrl+s in the editor." |
+| `type_in_app` | Types text into the focused window, or into a window it focuses first, as if you typed it. | Always | "Type the shopping list into the text editor." |
+
+"Always" means the same as for the other computer tools: they ask even in **Act without asking** mode. That includes `list_apps`, `list_windows` and `desktop_screenshot`, which only look. A desktop screenshot can show anything on your screen, so close windows you do not want the model to see first.
+
 ### MCP tools
 
 MCP (Model Context Protocol) is a standard way to plug extra tools into an AI agent. What these tools do depends on the server: ask the agent in plain words, and it sees each tool's own description. There are two kinds.
@@ -580,7 +684,7 @@ A tool call that takes longer than five minutes is cancelled. If a server cannot
 
 ## Settings reference
 
-Open Settings with the sliders icon. "Changes are saved automatically." Sections appear in this order. The Computer tools management area is the exception: it has its own **Apply** button.
+Open Settings with the sliders icon. "Changes are saved automatically." Sections appear in this order: Providers, Image generation, Computer tools, Remote access, Remote MCP servers, Behaviour and About. Two parts save differently: the companion's own settings under Computer tools have an **Apply** button, and the Remote access and Desktop tools switches are sent to the companion the moment you change them.
 
 ### Providers
 
@@ -600,6 +704,16 @@ Each provider is a card with:
 Below the cards, **Add provider…** adds a preset. Defaults: **LM Studio** (`http://localhost:1234/v1`, the active provider) and **Ollama** (`http://localhost:11434/v1`). Other presets: OpenAI, Anthropic, Google Gemini, OpenRouter, Groq, Mistral, DeepSeek, xAI, Together AI and **Custom (OpenAI-compatible)**. Changing a provider's type or base URL clears its stored model list; reload it from the header.
 
 You do not have to set up cross-origin rules (CORS) on local servers such as Ollama: the extension handles that for servers on your own computer or network.
+
+**Add from connection code** (the button beside **Add provider…**) adds models that run on another computer. It opens a small form:
+
+| Field | Meaning |
+|---|---|
+| **Connection code** | Paste the code from Settings → Remote access on the other computer. It starts with `aa1:`. The field hides the code; **Show** reveals it. |
+| **Also add its computer tools as a remote MCP server** | Only appears when the pasted code includes the other computer's tools. Tick it to add them to Remote MCP servers as `remote-computer`. |
+| **Add** / **Cancel** | **Add** creates the entries. |
+
+It makes one provider for each model in the code, named like `LM Studio (remote)`: type OpenAI-compatible, the Base URL is the tunnel link plus `/llm/` and the model's name, and the API key is the code's access token. A provider that already has that Base URL is left alone. Afterwards, click **Test connection** on a new provider to load its model list, then choose it in the header. The step-by-step is in [Remote access](#remote-access).
 
 ### Image generation
 
@@ -627,12 +741,13 @@ Images are made by the provider you choose here. With a cloud provider, your des
 | **Approval** | **Always ask before computer tools (recommended)**, or **Follow the chat’s approval mode**. See [Approval behaviour](#approval-behaviour). | Always ask |
 | **Test connection** | Checks the companion. On success it shows "Connected to the companion" with its version, platform, user and the number of tools available. | |
 
-<img src="images/settings-computer-tools.png" alt="Settings, Computer tools section: Enabled, the default address, a hidden token, the Approval choice, a green 'Connected to the companion' box with version, platform, user and 20 tools available, and the companion settings below it." width="400">
+<img src="images/settings-computer-tools.png" alt="Settings, Computer tools section: Enabled, the default address, a hidden token, the Approval choice, a green 'Connected to the companion' box with version, platform, user and 25 tools available, then Companion settings with the Desktop tools block (a Linux X11 session, five available tools, and three missing helpers with their install commands) above Allow shell commands, Allow writing files and Command timeout." width="400">
 
-When the connection works, **Companion settings** appears (use **Refresh** to read the current state again):
+When the connection works, **Companion settings** appears (use **Refresh** to read the current state again). It has three parts. **Desktop tools** (a switch and two lists) is applied at once. **Commands and files** and **Local MCP servers** are applied with **Apply**:
 
 | Field | Meaning | Default |
 |---|---|---|
+| **Desktop tools** → **Enabled** | Lets the agent list, open, focus and close apps and windows, take screenshots of the screen and send keystrokes. Switching it takes effect at once, without **Apply**. Under it, a line names your system (for example "Linux · X11 session" or "macOS"), **Available tools** lists the desktop tools that work on this computer, and **Missing helpers** lists the others, each with the command to install what it needs and a **Copy** button. On Windows it says "desktop tools are not available on this system yet". With an older companion it says "This companion version has no desktop tools. Update agent-companion.mjs and restart it." | On |
 | **Allow shell commands** | Lets the agent run commands and open files, folders and apps. | On |
 | **Allow writing files** | Lets the agent create, change and overwrite files. Without it the agent can only read. | On |
 | **Command timeout (seconds)** | A command that runs longer is stopped. | 120 |
@@ -640,7 +755,25 @@ When the connection works, **Companion settings** appears (use **Refresh** to re
 | **Add server** / **Paste JSON** | Add a server by form, or paste a ready-made configuration. | |
 | **Apply** / **Discard changes** | These settings are not saved automatically, because applying them restarts programs. "Unsaved changes. They take effect when you click Apply." **Apply** sends them to the companion; **Discard changes** goes back. | |
 
-The defaults for the first three come from the companion itself. See [Computer tools in depth](#computer-tools-in-depth).
+The defaults for the switches and the timeout come from the companion itself. See [Computer tools in depth](#computer-tools-in-depth).
+
+### Remote access settings
+
+"Use your local models and this computer’s tools from another browser or device. The companion opens a Cloudflare tunnel for you." This section needs a working companion connection; without one it says "Connect the companion above to use remote access". Every change here is sent to the companion at once. The step-by-step is in [Remote access](#remote-access).
+
+<img src="images/remote-access.png" alt="Settings, Remote access section: a green Running badge, the public link, the connection code hidden behind dots with Show and Copy buttons, three checkboxes (Expose local models ticked), and the list of local models with LM Studio ticked." width="400">
+
+| Field | Meaning | Default |
+|---|---|---|
+| Status | A badge (**Stopped**, **Downloading cloudflared…**, **Starting…**, **Running** or **Error**) with a line of text, and below it whether `cloudflared` is installed. An error shows the reason. | Stopped |
+| **Start tunnel**, **Stop tunnel**, **Refresh** | Open or close the tunnel. The first start downloads the companion's own private copy of `cloudflared` (about 40 MB), which takes up to a minute. **Refresh** reads the state again. | |
+| **Public link** | The `https://…` address of the tunnel, with a **Copy** button. Shown while the tunnel runs. A quick tunnel gets a new one each time it starts. | |
+| **Connection code** | The code for the other browser, starting with `aa1:`. Hidden as `aa1:••••` until you click **Show** (**Hide** hides it again); **Copy** copies it. It contains the access token, so treat it like a password. | |
+| **Expose local models** | Lets the other browser send prompts to the local models ticked in the list below. | On |
+| **Expose computer tools** | Lets the other browser use this computer's tools (commands, files, apps), within the limits set under Computer tools. Only turn this on if you need it. | Off |
+| **Start tunnel when the companion starts** | The companion opens the tunnel by itself each time it starts. | Off |
+| **Expose these local models** | One checkbox for each provider of yours that is on this computer or your local network (an OpenAI-compatible provider with an address such as `localhost` or `192.168…`), with its name and address. Only ticked ones can be reached through the tunnel. It follows the providers you add or remove. | None ticked |
+| **Advanced: named tunnel** | **Tunnel type**: **Quick tunnel (no account, new link each time)** or **Named tunnel (your Cloudflare account, fixed link)**. **Named tunnel token**: pasted once and never shown again; afterwards it says "A token is saved", with a **Clear token** button (click it twice). **Public address**: the `https://…` address you gave the tunnel in Cloudflare; shown for a named tunnel. Click **Save**, then stop and start the tunnel. See [Named tunnels](#named-tunnels). | Quick |
 
 ### Remote MCP servers
 
@@ -664,13 +797,14 @@ Click **Add MCP server**. Each card has:
 | **Approval** | **Ask before acting** or **Act without asking**. Same as the list in the composer. | Ask before acting |
 | **Queue mode** | **Run all** starts the next queued prompt straight away; **One at a time** waits for you after each one. Same as the queue bar. | Run all |
 | **Vision** | Whether screenshots and images are sent to the model: **Auto-detect**, **On** or **Off**. With Auto-detect, the agent tries, and stops sending images if the model refuses them. | Auto-detect |
-| **Max steps** | Model turns per request (1 to 1000). See [Long tasks and the step limit](#long-tasks-and-the-step-limit). | 40 |
+| **Max steps per prompt** | Model turns per request. `0` means no limit. See [Long tasks](#long-tasks). | 0 |
 | **Tool calling** | How tools are offered to the model: **Auto (native, fall back to prompted)**, **Native**, or **Prompted (for models without tool support)**. Prompted describes the tools in the instructions and the model writes calls as text, which is less reliable. | Auto |
 | **Max output tokens** | Longest reply the model may write. Blank means the provider default. | Blank |
 | **Temperature** | How adventurous the model is, from 0 (steady) to 2. Blank means the model default. | Blank |
 | **Context budget (chars)** | How much conversation text is sent to the model, counted in characters (roughly four per token). Older tool output and long old messages are shortened to fit; the chat itself keeps everything. Lower it for small-context models. Minimum 2,000. | 100000 |
 | **Max tool output (chars)** | Longest result of a single tool call that the model sees. Longer results are cut. Minimum 2,000. | 12000 |
-| **Trusted input events** | Uses Chrome's debugger to send real mouse and keyboard events, for sites that ignore simulated ones. Chrome shows a debugging banner while it is active. | Off |
+| **Trusted input events** | Uses Chrome's debugger to send real mouse and keyboard events, for sites that ignore simulated ones. Chrome shows a debugging banner while it is active. Not available in Firefox. | Off |
+| **Desktop notifications** | Shows approval requests and finished or failed jobs as desktop notifications while the panel is closed. See [Closing the panel](#closing-the-panel). | On |
 | **Custom instructions** | Text added to the agent's instructions on every request, for example "Reply in British English. Never submit payment forms." | Empty |
 
 ### About
@@ -681,7 +815,7 @@ Shows the extension's name and version, and "Open source under the MIT licence."
 
 ### How it works
 
-A browser extension cannot start programs or touch your files. The **companion** is a small program, a single file called `agent-companion.mjs`, that runs on your computer and does it on the extension's behalf. It listens only on your own computer (`127.0.0.1`), and every request must carry a secret token. It provides nine built-in tools (see [Computer tools (companion)](#computer-tools-companion)) and can run local MCP servers. It is optional.
+A browser extension cannot start programs or touch your files. The **companion** is a small program, a single file called `agent-companion.mjs`, that runs on your computer and does it on the extension's behalf. It listens only on your own computer (`127.0.0.1`), and every request must carry a secret token. It provides nine built-in tools (see [Computer tools (companion)](#computer-tools-companion)), eight [desktop tools](#desktop-tools) on Linux and macOS, and can run local MCP servers. It can also open a [tunnel](#remote-access) so that another browser can use your local models. It is optional.
 
 Computer tools run with the permissions of your user account. They can read, change and delete your files and run any program you could run yourself.
 
@@ -695,7 +829,7 @@ The companion's [own README](../companion/README.md) lists all its command-line 
 4. The companion prints an address and a **token**, a random 64-character code, like this:
 
    ```text
-   Agent Automation companion 1.1.0
+   Agent Automation companion 1.2.0
      URL      http://127.0.0.1:8765
      Token    3f9a…
    ```
@@ -721,6 +855,50 @@ These two switches in Settings → Computer tools remove the riskiest tools comp
 - Without **Allow writing files**, it cannot create or change files (`write_file`). It can still read.
 
 Switch off what you do not need. Change them, then click **Apply**; the companion keeps the setting in its file and notices when you edit the file by hand.
+
+### Desktop tools
+
+Desktop tools let the agent work with programs outside the browser: open an application, see which windows are open, bring one to the front, close it, take a picture of the whole screen, press keys and type text. They are part of the companion, they exist on **Linux and macOS** (not yet on Windows), and they are on by default. Switch them off with Settings → Computer tools → **Desktop tools** → **Enabled**. Every call asks for your approval, like all computer tools.
+
+The agent is only offered the tools that can work on your computer. Settings → Computer tools → Desktop tools names your system (for example "Linux · X11 session"), lists the **Available tools**, and under **Missing helpers** gives the install command for each tool that cannot work yet. After installing, click **Refresh**.
+
+**macOS.** Nothing to install, but macOS asks for permission the first time, for the app that runs the companion: your terminal app, or `node` when the companion starts at login (find its path with `which node`; in the file dialog press Cmd+Shift+G to type it).
+
+- **Automation** (windows and keys): when macOS asks whether the app may control "System Events", click **OK**. If you clicked "Don't Allow", change it in System Settings → Privacy & Security → Automation.
+- **Accessibility** (`send_keys`, `type_in_app`, window titles, `close_window`): System Settings → Privacy & Security → Accessibility → **+**, add the app and switch it on.
+- **Screen Recording** (`desktop_screenshot`): System Settings → Privacy & Security → Screen & System Audio Recording, same app. Without it the picture shows only the desktop background.
+
+**Linux.** Applications come from the `.desktop` files of your desktop menu. Keys, windows and screenshots use small helper programs, and which ones depend on your session type. Settings shows the type; or run `echo $XDG_SESSION_TYPE` in a terminal.
+
+| Session | Install | What you get |
+|---|---|---|
+| X11 (Xorg) | Debian, Ubuntu: `sudo apt install xdotool wmctrl scrot`<br>Fedora: `sudo dnf install xdotool wmctrl scrot` | Keys and typing (`xdotool`), windows (`wmctrl` or `xdotool`), screenshots (`scrot`; `gnome-screenshot`, `maim` or ImageMagick `import` also work) |
+| Wayland | Debian, Ubuntu: `sudo apt install grim wtype ydotool`<br>Fedora: `sudo dnf install grim wtype ydotool` | Screenshots (`grim` on Sway and Hyprland, `gnome-screenshot` on GNOME, `spectacle` on KDE), keys and typing (`wtype` on Sway and Hyprland, `ydotool` on GNOME and KDE) |
+
+- On Wayland, `ydotool` needs its `ydotoold` service running.
+- On Wayland, GNOME, KDE and most other desktops do not let a program list, focus or close windows, so `list_windows`, `focus_window` and `close_window` are not offered there. Programs that run through XWayland can be reached when `wmctrl` is installed. If you need these tools, choose an "X11" or "Xorg" session at the login screen.
+- If the companion runs as a systemd user service and Settings says "No graphical session", run `systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XDG_SESSION_TYPE`, then restart the companion.
+- `gtk-launch` (part of GTK) is used to start applications when it is installed.
+
+**Windows.** Desktop tools are not available yet.
+
+Example prompts (the window ones need an X11 session on Linux):
+
+> Open the text editor.
+
+> Take a screenshot of the desktop and describe what is on it.
+
+> Focus the window called "Untitled" and type: Meeting notes, Monday 9:00.
+
+> List the open windows, then close the one called "Calculator".
+
+Working with them:
+
+- **Go in small steps.** A good order is `list_windows`, `focus_window`, then `type_in_app` or `send_keys`, then a `desktop_screenshot` to check the result (the model needs vision to read it).
+- **Keys and typing go to whichever window has the keyboard.** Read the approval card: it shows the keys or the text, and the window the agent wants to focus first. A wrong shortcut in the wrong window can close or delete things.
+- **A desktop screenshot shows your whole screen,** not only the browser, scaled down to at most 1600 pixels wide. With a cloud model it is sent to that company. Close what you do not want seen first.
+- `launch_app` starts a program that keeps running when the companion stops.
+- On macOS, if a tool says "osascript did not answer", macOS is showing a permission dialog. Click **OK** and ask again.
 
 ### Local MCP servers
 
@@ -771,7 +949,78 @@ Settings → Computer tools → **Approval** has two choices:
 - A command is stopped after the **Command timeout** (default 120 seconds); the agent can ask for a different limit for one command, up to 24 hours.
 - Long command output is cut in the middle at about 60,000 characters.
 - Commands run without a keyboard: a program that asks a question gets an end-of-file instead.
+- `desktop_screenshot` pictures are scaled down to at most 1600 pixels wide.
 - On a Mac, the first time the agent reads Documents, Desktop or Downloads, macOS asks whether "node" may access them. Allow it if you want that.
+
+## Remote access
+
+### What it is for
+
+Say you have a computer at home or in the office with LM Studio or Ollama and a good model, and you are working somewhere else, in another browser, on a laptop that cannot run that model. **Remote access** lets the extension in the other browser use the model on your home computer. The companion starts a **Cloudflare tunnel** (a private road from the internet to the companion) and shares only what you choose. You need no Cloudflare account, no router settings and no other software: the companion fetches its own copy of `cloudflared`, Cloudflare's tunnel program, the first time.
+
+This guide calls the computer with the model and the companion **computer A**, and the other browser **computer B**. Only the model is remote: on computer B, the agent still reads and clicks pages in computer B's browser, and only its questions to the model travel to computer A.
+
+<img src="images/remote-access.png" alt="Settings, Remote access section: a green Running badge, the public link, the connection code hidden behind dots with Show and Copy buttons, three checkboxes (Expose local models ticked), and the list of local models with LM Studio ticked." width="400">
+
+### Set it up, step by step
+
+**On computer A (the one with the model):**
+
+1. Start your model server (LM Studio's server or `ollama serve`) and check that the model works in the panel.
+2. Start the companion and connect it: Settings → Computer tools → switch on **Enabled**, paste the **Token**, click **Test connection** (see [Set up and the token](#set-up-and-the-token)).
+3. Go to Settings → **Remote access**. If it says "Connect the companion above to use remote access", fix the connection first.
+4. Under **Expose these local models**, tick the models to share. Nothing is shared until you tick it. Check that **Expose local models** is on (it is by default). Leave **Expose computer tools** off unless you need it.
+5. Click **Start tunnel**. The first time, the badge says **Downloading cloudflared…** ("This happens once and can take a minute"), then **Starting…**, then **Running**. The **Public link** and the **Connection code** appear.
+6. Click **Copy** next to the connection code (or **Show** to read it).
+
+If you change the ticked models or **Expose computer tools** while the tunnel runs, the connection code updates by itself. Copy it again afterwards, and paste it in the other browser.
+
+**On computer B (the other browser):**
+
+1. Install the extension in that browser (see [Install](#install)).
+2. Open Settings → Providers and click **Add from connection code**. Paste the code and click **Add**. It creates one provider for each shared model, named like `LM Studio (remote)`.
+3. Click **Test connection** on the new provider to load its model list.
+4. In the panel header, choose the provider that ends in "(remote)" and one of its models. Use the agent as usual.
+
+**To use computer A's computer tools from computer B too**, tick **Expose computer tools** on computer A before copying the code. On computer B, a tick box then appears in the form: **Also add its computer tools as a remote MCP server**. The tools show up in B's agent as a remote MCP server named `remote-computer`. On computer B they follow the rules for remote MCP tools, not the stricter always-ask rule for local computer tools: in **Ask before acting** mode, the tools the companion marks as read-only (reading files, listing folders, the clipboard, system information, listing apps and windows, desktop screenshots) run without a question, and in **Act without asking** mode every one of them does. Read [Staying safe](#staying-safe) first.
+
+When you are done, click **Stop tunnel** on computer A. To have the tunnel start whenever the companion starts, tick **Start tunnel when the companion starts**; with a quick tunnel, its link is new each time, so you paste a new code on computer B.
+
+### What the other browser can reach
+
+Through the tunnel, only these things work, and only with the access token:
+
+- **Your local models**, one by one, when **Expose local models** is on and the model is ticked. The other browser sends its prompts to `<link>/llm/<name>`, and the companion passes them on to the model server on computer A, including streamed answers. The model server never sees the token.
+- **Your computer tools** (`<link>/mcp`), only when **Expose computer tools** is on. They run on computer A, with computer A's own limits: **Allow shell commands**, **Allow writing files** and **Desktop tools** still apply.
+- **A short status:** the companion's version, the tunnel state and what is shared. No folders, user name, tool list or settings.
+
+Everything else, including the companion's settings and the tunnel controls, is refused ("403") when it comes through the tunnel. You can only change them on computer A.
+
+### Staying safe
+
+- **Anyone who has both the link and the token can use what you share.** The connection code contains both, so treat it like a password: share it only with browsers and people you trust, and stop the tunnel when you are not using it. A quick tunnel's link stops working when the tunnel stops, which limits the damage of a leaked code to the time the tunnel is up.
+- **Keep Expose computer tools off unless you need it.** The approval questions are asked by the extension. Someone who has the link and the token and talks to the companion directly is not asked anything, so with computer tools exposed a leaked code could run commands on computer A. If you do expose them, switch off **Allow shell commands**, **Allow writing files** and **Desktop tools** that you do not need, and stop the tunnel afterwards.
+- **Wrong tokens are slowed down.** After 10 wrong tokens from one address, the companion blocks that address for 15 minutes.
+- **The traffic is encrypted** between the other browser and Cloudflare (HTTPS), but it travels over Cloudflare's network, so prompts and answers pass through it.
+- **It stays out of your other Cloudflare setup.** If computer A already uses Cloudflare Tunnel for something else, the companion does not touch it. It uses its own private copy of `cloudflared` in `~/.agent-automation/bin/`, its own configuration file and its own log (`tunnel.log`); it never reads or writes `~/.cloudflared`, never logs in to an account, never installs a service, and never changes an installed `cloudflared`. **Stop tunnel** ends only the process the companion started.
+- **If you think a code leaked,** stop the tunnel and get a new token (see [Set up and the token](#set-up-and-the-token)).
+
+### Limits of remote access
+
+- **Quick tunnels have no uptime guarantee.** Cloudflare offers them without an account, and they may drop or be slow. Start again if one stops; the status shows **Error** with the reason, and the last lines of cloudflared's output.
+- **Replies must start within about 100 seconds.** If the model has not begun its answer by then, Cloudflare gives up and the other browser sees an error 524. Prefer models and servers that stream their answer, and avoid very large prompts on slow hardware. Once an answer is streaming, it may pause for up to 10 minutes between pieces.
+- **The link changes** each time a quick tunnel starts, also after the companion restarts.
+- **Computer A must stay on** with the model server and the companion running, and be able to reach the internet (outgoing connections to Cloudflare, ports 443 and 7844).
+- Pressing **Stop** on computer B also stops the request to the model on computer A.
+
+### Named tunnels
+
+A quick tunnel is the right choice for most people. A named tunnel keeps one fixed link, but needs a Cloudflare account with a domain.
+
+1. In the Cloudflare dashboard, create a tunnel (Zero Trust → Networks → Tunnels) and give it a public hostname whose service is `http://127.0.0.1:8765`. In that hostname's HTTP settings, set **HTTP Host Header** to `127.0.0.1:8765`.
+2. Copy the tunnel token (a long code starting with `eyJ`; pasting the whole `cloudflared service install …` line works too).
+3. In Settings → Remote access → **Advanced: named tunnel**, choose **Named tunnel (your Cloudflare account, fixed link)**. Paste the token into **Named tunnel token**, and enter the public hostname you gave the tunnel (for example `https://companion.example.com`) in **Public address**. It must start with `https://`. Click **Save**. The token is kept on computer A and never shown again; **Clear token** removes it (click twice).
+4. Stop and start the tunnel. The **Public link** and the **Connection code** then show your fixed address.
 
 ## Safety and privacy
 
@@ -781,7 +1030,8 @@ Everything is stored on your computer, in your Chrome profile:
 
 - **Settings, including API keys and the companion token**, are stored unencrypted in the extension's local storage.
 - **Chats, their queues and their files** are stored unencrypted in the extension's browser database. Deleting a chat in History removes it and its files. Removing the extension removes everything it stored.
-- The **companion** keeps its token, settings and a log in `~/.agent-automation/`.
+- The **companion** keeps its token, settings and a log in `~/.agent-automation/`. If you use remote access, it also keeps its own copy of `cloudflared` there (in `bin/`) and the tunnel's log, `tunnel.log`. A named tunnel's token is stored in `companion.json`.
+- **Desktop notifications** show text from your chats (the name of an action, the first part of an answer) in your operating system's notification area. Turn them off in Settings → Behaviour if others can see your screen.
 
 ### What leaves your computer
 
@@ -790,13 +1040,15 @@ Everything is stored on your computer, in your Chrome profile:
 - **Web search** sends the search words to DuckDuckGo or Bing, from your browser.
 - **Fetching a page** (`fetch_url`) uses your browser's logins for that site, so the agent can read pages you can read.
 - **To MCP servers** you add, whatever the agent passes to their tools.
+- **Desktop screenshots** show your whole screen, not only the browser. They go to your model provider like any screenshot, so with a cloud model, anything visible on screen goes to that company.
+- **Through a tunnel,** if you use [remote access](#remote-access): the prompts from the other browser and the answers of your local model pass through Cloudflare's network, and only what you chose to share can be reached.
 - The extension itself has no accounts and sends nothing to its authors.
 
 ### Approvals and what they do not cover
 
-The agent works inside your browser, where you are already logged in. Anything you could do on a site, it can do, so it can also change, delete or publish things there. Approvals are your safety net. They cover clicking, typing, selecting, key presses, scripts, closing tabs, uploads, downloads, non-read web requests, and tools from MCP servers.
+The agent works inside your browser, where you are already logged in. Anything you could do on a site, it can do, so it can also change, delete or publish things there. Approvals are your safety net. They cover clicking, typing, selecting, key presses, scripts, closing tabs, uploads, downloads, non-read web requests, tools from MCP servers, and all computer tools including the desktop tools. They also cover an agent that runs while the panel is closed: it waits for your answer to a notification.
 
-They do not cover going to a web address or opening a tab, and reading a page. In a long task you will also get approvals for the same kind of action many times; if you use **Allow all (this chat)**, you are trusting the rest of that chat.
+They do not cover going to a web address or opening a tab, and reading a page. They also do not protect computer tools that you share through a tunnel from someone who has the link and the token and does not use the extension: see [Staying safe](#staying-safe). In a long task you will also get approvals for the same kind of action many times; if you use **Allow all (this chat)**, you are trusting the rest of that chat.
 
 ### Prompt injection
 
@@ -814,17 +1066,19 @@ Practical advice:
 
 ### API keys and tokens
 
-API keys are stored in the extension's local storage on this computer, unencrypted, and are sent only to the provider you set them for. Anyone who can use your computer account or your Chrome profile can read them. Use keys with spending limits and rotate a key if you think it leaked. Never paste a key into a chat message or a **Custom instructions** box: those go to the model. The companion token works like a password for your computer, so do not share it. Do not run the companion with `--host` to listen on your network; anyone with the token could then run commands as you.
+API keys are stored in the extension's local storage on this computer, unencrypted, and are sent only to the provider you set them for. Anyone who can use your computer account or your Chrome profile can read them. Use keys with spending limits and rotate a key if you think it leaked. Never paste a key into a chat message or a **Custom instructions** box: those go to the model. The companion token works like a password for your computer, so do not share it. The connection code from Remote access contains the token and the tunnel link, so it needs the same care. Do not run the companion with `--host` to listen on your network; anyone with the token could then run commands as you.
 
 ### Permissions the extension asks for
 
 Chrome shows that the extension can read and change data on all websites. That is what lets it work on whichever page you open, but it also means you should install it only from this project's releases or source. In plain words, the extension uses:
 
 - **Side panel**: to show the panel.
-- **Tabs, scripting and all sites**: to read pages and act on them.
+- **Tabs, scripting and all sites**: to read pages and act on them. In Firefox, site access is optional: if it is off, the panel shows an **Allow access** banner.
 - **Storage and unlimited storage**: for settings, chats and files.
 - **Downloads**: to save files you ask it to download.
-- **Debugger**: for Trusted input events, and to run scripts on pages whose security rules block them. Chrome shows a banner while this is active.
+- **Notifications**: to show approval requests and finished jobs while the panel is closed.
+- **Offscreen document** (Chrome and Chromium-based browsers): a hidden page that runs the agent, so that jobs go on while the panel is closed. In Firefox the agent runs in the extension's background page, and the Firefox build also asks for **active tab**, which lets screenshots work on the tab where you clicked the toolbar button. It declares to Firefox that it collects no data.
+- **Debugger** (Chrome and Chromium-based browsers): for Trusted input events, and to run scripts on pages whose security rules block them. Chrome shows a banner while this is active.
 - **Request header rules for your own servers**: so local servers such as Ollama accept its requests without setup.
 
 ## Troubleshooting and FAQ
@@ -849,7 +1103,8 @@ Chrome shows that the extension can read and change data on all websites. That i
 | Context-length errors from a small model | The chat plus tools is larger than the window. | Lower **Context budget (chars)**, or start a new chat. |
 | A long chat seems to forget the start | Older tool output is trimmed to fit the **Context budget**. The chat itself keeps everything. | Start a new chat for a new job, and repeat the facts that matter. |
 | "The model returned an empty response." | The model produced nothing. | Press **Retry**, or try again. If it keeps happening, try a different model. |
-| "Step limit reached (40). Send "continue" to keep going." | The request used up **Max steps**. | Type `continue`, or raise **Max steps**. |
+| "Step limit reached (N). Send "continue" to keep going." | You set **Max steps per prompt** to a number, and the request used it up. | Type `continue`, raise **Max steps per prompt**, or set it to `0` for no limit. |
+| It keeps trying the same failing thing | The model is stuck. After three identical failures it is told to try something else, but nothing forces it to. | Press **Stop**, say what to do differently, or use a stronger model. See [Long tasks](#long-tasks). |
 | It describes a screenshot wrongly or says it cannot see | The model has no vision. | Use a vision-capable model, or ask for text-based answers. Settings → Behaviour → **Vision** can be set to **On** or **Off**. |
 | It does something you did not ask for | The wording was open, or a page contained instructions. | Stop, undo by hand, and be more specific. See [Prompt injection](#prompt-injection). |
 
@@ -886,9 +1141,7 @@ Chrome shows that the extension can read and change data on all websites. That i
 
 | What you see | Cause | Fix |
 |---|---|---|
-| Only some chats are open after a restart | With two Chrome windows, only the open chats of the window that changed last are restored. | Every chat is still in History. |
-| "This chat is open in another window, so it is read-only here." | Another window has the chat open. | Close it there, or use **Open a copy**. |
-| A run stopped when you closed the panel | Runs only continue while the panel is open. | Reopen the chat and press **Continue**. |
+| "This chat was interrupted." | The browser was closed, or the extension was reloaded or updated, while the chat was working. | Press **Continue**. Closing the panel does not cause this. |
 | "Could not save this chat: …" with a red dot on the tab | Storage is full or unavailable. | Free disk space, delete old chats in History, then press **Retry**. Export what you need first. |
 | "Could not load saved chats" in History | Browser storage did not answer. | Press **Retry**. If it persists, restart Chrome. |
 | "This chat is no longer saved — it may have been deleted in another window." | It was deleted elsewhere. | Close the tab. |
@@ -900,8 +1153,8 @@ Chrome shows that the extension can read and change data on all websites. That i
 | What you see | Cause | Fix |
 |---|---|---|
 | "The companion is not running at http://127.0.0.1:8765." | The companion is not started, or the address is wrong. | Run `node agent-companion.mjs`, and check **Address**, including the port. |
-| "The companion (version 1.1.0) is running but rejected the token." (the version number may differ) | Wrong or old token. | Copy the token again: `node agent-companion.mjs --print-token`. |
-| "The companion (version 1.1.0) is refusing this connection (HTTP 403)." | The request came from a web page or another address. | Use `http://127.0.0.1:8765` as the address, and update the companion to the latest version. |
+| "The companion (version 1.2.0) is running but rejected the token." (the version number may differ) | Wrong or old token. | Copy the token again: `node agent-companion.mjs --print-token`. |
+| "The companion (version 1.2.0) is refusing this connection (HTTP 403)." | The request came from a web page or another address. | Use `http://127.0.0.1:8765` as the address, and update the companion to the latest version. |
 | "Something answered at …, but it does not look like the Agent Automation companion." | Another program uses that port. | Check **Address**, or start the companion on another port. |
 | "did not answer within 8 seconds" | The companion is busy, blocked, or the port belongs to something else. | Check the terminal window and the address. |
 | In the chat: "Computer companion: Cannot reach …" | The companion stopped after you connected. | Start it again. |
@@ -911,21 +1164,78 @@ Chrome shows that the extension can read and change data on all websites. That i
 | macOS asks whether "node" may access a folder | Standard macOS privacy protection. | Allow it, if you want the agent to use files there. |
 | Aliases from `~/.zshrc` do not work in commands | Commands run without your shell's aliases. | Use the real command or its full path. |
 
+### Desktop tools problems
+
+| What you see | Cause | Fix |
+|---|---|---|
+| The agent has no desktop tools | **Desktop tools** → **Enabled** is off, you are on Windows (not available yet), the companion is older than 1.2, or none of the tools can work yet. | Settings → Computer tools → Desktop tools: switch **Enabled** on and read **Missing helpers**. Update `agent-companion.mjs` if it says the companion has no desktop tools. |
+| A tool is under **Missing helpers** | A helper program is not installed. | Run the install command shown (**Copy** copies it), then click **Refresh**. See [Desktop tools](#desktop-tools). |
+| `list_windows`, `focus_window` and `close_window` are missing on Linux | You are in a Wayland session, which does not let programs control windows. | Choose an "X11" or "Xorg" session at the login screen, or install `wmctrl` to reach XWayland programs. |
+| "No graphical session" | The companion runs as a systemd service without your desktop's environment. | `systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XDG_SESSION_TYPE`, then restart the companion. |
+| "osascript did not answer" (macOS) | macOS is showing a permission dialog. | Click **OK** in it, then ask again. |
+| "macOS blocked this" (macOS) | The app that runs the companion lacks Automation or Accessibility permission. | System Settings → Privacy & Security → Automation or Accessibility: allow your terminal app, or `node` when the companion starts at login. |
+| The screenshot shows only the desktop background (macOS) | No Screen Recording permission. | System Settings → Privacy & Security → Screen & System Audio Recording: allow the same app, then restart the companion. |
+| Typing and keys fail on GNOME or KDE (Wayland) | `ydotool` needs its `ydotoold` service to be running. | Start the `ydotoold` service, or install `wtype` on Sway and Hyprland. |
+
+### Remote access problems
+
+| What you see | Cause | Fix |
+|---|---|---|
+| "Connect the companion above to use remote access" | The companion is not connected. | Settings → Computer tools: **Enabled**, **Token**, **Test connection**. |
+| The status says **Error**, or "Could not download cloudflared" | The companion could not download or start `cloudflared`, usually because the computer cannot reach GitHub or Cloudflare. | Read the reason under the badge. Install `cloudflared` yourself (`brew install cloudflared` on macOS, [pkg.cloudflare.com](https://pkg.cloudflare.com/) on Linux, `winget install --id Cloudflare.cloudflared` on Windows); the installed one is then used. All of cloudflared's output is in `~/.agent-automation/tunnel.log`. A quick tunnel needs outgoing access to Cloudflare on ports 443 and 7844. |
+| It says "Still starting after 2 minutes, so this page stopped checking" | The tunnel is slow to start. | Click **Refresh**, or **Stop tunnel** to cancel. Look at the companion's terminal window. |
+| The other browser stopped working after a restart | A quick tunnel's link changes every time it starts. | Copy the new connection code on computer A and add the providers again on computer B (remove the old ones first). Or use a named tunnel. |
+| On computer B: error 403 | That path is not shared. | On computer A, tick **Expose local models** (and the model in the list) or **Expose computer tools**, then copy the code again. |
+| On computer B: error 401 | The token is wrong or the code is old. | Paste the current connection code again. |
+| On computer B: error 429 | Too many wrong tokens from this address. | Wait 15 minutes, and use the current code. |
+| On computer B: error 524 | The model did not start its answer within about 100 seconds. | Use a model that streams, a shorter prompt, or faster hardware. |
+| On computer B: error 502, "… is not running at …" | The model server on computer A is not running. | Start LM Studio's server or Ollama on computer A. |
+| "That is not a connection code: it should start with “aa1:”" | The wrong text was pasted. | Copy the **Connection code** again from computer A (not the link). |
+| "The code is damaged…" | Part of the code was cut off. | Copy it again in full. |
+| "This code has nothing to add" | The code lists no models and no computer tools. | On computer A, tick **Expose local models** and at least one model, restart the tunnel and copy the code again. |
+| "…is refused: the access token would travel in the clear" | The code points at an `http` address on the internet. | Tunnel links start with `https`. Copy the code again from Remote access. |
+
+### Background runs and notifications
+
+| What you see | Cause | Fix |
+|---|---|---|
+| No notification when the panel is closed | **Desktop notifications** is off in Settings → Behaviour; or a panel is open in another browser window (notifications only appear when no panel is open anywhere); or your operating system blocks notifications from the browser (check its notification settings and any Do Not Disturb or Focus mode). | Fix the cause. The question is still waiting in the panel, and the badge shows the number of running chats, amber when one waits. |
+| The notification has no **Allow** and **Deny** buttons | You use Firefox, which has no notification buttons. | Click the notification. It opens the panel in a browser tab, on that chat, where you can answer. |
+| The badge says a chat is running, but nothing seems to happen | It may be waiting for your approval, or the model is slow. | Open the panel: a pulsing dot on a tab means it wants approval. Press **Stop** if it should not go on. |
+| I closed the panel and the chat is not running any more | The browser was closed, or the extension was reloaded or updated. | Reopen the chat and press **Continue**. |
+| "Job failed" notification | The run ended with an error, for example the model server stopped answering. | Open the panel and press **Retry**. |
+
+### Firefox problems
+
+| What you see | Cause | Fix |
+|---|---|---|
+| The panel shows an **Allow access** banner, or the agent cannot read or click any page | Firefox has not given the extension access to websites. | Click **Allow access**, or turn it on in `about:addons` → Agent Automation → **Permissions**. |
+| The extension is gone after Firefox restarted | A temporary add-on is removed when Firefox quits. | Load it again from `about:debugging#/runtime/this-firefox`, or use a permanent option: see [Firefox notes](#firefox-notes). |
+| Firefox says the add-on is not verified or cannot be installed | Release and Beta Firefox refuse unsigned add-ons and ignore `xpinstall.signatures.required`. | Use **Load Temporary Add-on…**, Firefox Developer Edition, Nightly or ESR with `xpinstall.signatures.required` set to `false`, or sign your own copy: see [Firefox notes](#firefox-notes). |
+| The `screenshot` tool fails on a page | In Firefox 128 to 151, screenshots only work on a tab where you clicked the toolbar button or pressed the shortcut. | Click the toolbar button while that tab is shown, then ask again; or ask for the page as text. Firefox 152 and later has no such limit. |
+| **Trusted input events** is off and cannot be switched on, or scripts fail on a page with strict security rules | Both need Chrome's debugger API, which Firefox does not have. | Use Chrome or a Chromium-based browser for those pages. |
+
 ### FAQ
 
-**Does the side panel need to stay open?** Yes. The agent works only while the panel is open. Closing it stops the run, and you can continue later.
+**Does the agent keep working if I close the panel?** Yes. Since version 1.2 the agent runs in the background, so closing or hiding the panel does not stop a job. The toolbar icon shows how many chats are running, and if the agent needs an approval, or finishes or fails, you get a desktop notification. What does stop a run is closing the browser, or reloading or updating the extension; then the chat is kept and offers **Continue**. See [Closing the panel](#closing-the-panel).
 
-**Can I keep using Chrome while it works?** Yes, but a screenshot or a tab switch brings that tab to the front, and clicks go to the tab the agent is on. If you need to browse, use another Chrome window.
+**Why did it stop?** A run ends for one of these reasons: the agent finished the task (it answered without asking for more tools); you pressed **Stop** or **Esc**; an error ended it (a red notice, with **Retry**); you set **Max steps per prompt** and it was reached (the notice starts with "Step limit reached"); the browser or extension was closed or reloaded ("This chat was interrupted", with **Continue**); or the model returned an empty reply. It does not stop by itself for repeating a failing action: the loop guard only advises. If it seems to have stopped but the badge still shows a number, it may be waiting for your approval.
+
+**Can I use my local model from my laptop elsewhere?** Yes, with [Remote access](#remote-access). On the computer that runs the model, start the companion and click **Start tunnel** in Settings → Remote access. Copy the connection code. In the extension on your laptop, use Settings → Providers → **Add from connection code**. The model keeps running on your home computer, and only the questions and answers travel through Cloudflare.
+
+**Can I keep using my browser while it works?** Yes, but a screenshot or a tab switch brings that tab to the front, and clicks go to the tab the agent is on. If you need to browse, use another browser window. You can also close the panel; the agent keeps its tab.
 
 **Can it log in for me or solve a CAPTCHA?** It works in your browser, so sites you are already logged in to are open to it. It will not enter passwords unless you give them in the chat, and when it hits a login or a CAPTCHA it stops and tells you what it needs.
 
 **Can two chats work at the same time?** Yes, each in its own browser tab.
 
+**What if I leave a job running with no step limit?** It goes on until it finishes, fails or you stop it. With a paid cloud model, set **Max steps per prompt** to a number you are comfortable with before leaving a job unattended. See [Long tasks](#long-tasks).
+
 **Which model should I use?** One with tool calling and a large context window: a local Qwen, Llama 3.1 or later, Mistral or GPT-OSS model, or a current cloud model. For screenshots and images, one with vision.
 
 **What does it cost?** Local models cost nothing beyond your computer. Cloud models charge per use; long pages, screenshots and long chats use more. The extension itself is free (MIT licence).
 
-**Does it work in other browsers?** The project targets Chrome 116 or later. Other browsers are not covered.
+**Does it work in other browsers?** Yes: in Chrome 116 or later, in Chromium-based browsers (Chromium, Edge, Brave, Opera) with the Chromium download, and in Firefox 128 or later with a few limits (no Trusted input events, no fallback for pages that block scripts, notifications without buttons). See [Install](#install) and [Firefox notes](#firefox-notes).
 
 **How do I report a bug or suggest something?** Use **Report an issue** in Settings → About, or the [issues page](https://github.com/cyberkyd01/agent-automation/issues).
 
@@ -933,7 +1243,8 @@ Chrome shows that the extension can read and change data on all websites. That i
 
 | Keys | Where | What it does |
 |---|---|---|
-| **Ctrl+Shift+Y** (Mac: **Cmd+Shift+Y**) | Chrome | Opens the side panel. Change it at `chrome://extensions/shortcuts` if another extension uses it. |
+| **Ctrl+Shift+Y** (Mac: **Cmd+Shift+Y**) | Chrome and Chromium-based browsers | Opens the side panel. Change it at `chrome://extensions/shortcuts` if another extension uses it. |
+| **Ctrl+Shift+Y** (Mac: **Cmd+Shift+Y**) | Firefox | Opens or closes the sidebar. Change it in `about:addons` (gear menu, **Manage Extension Shortcuts**). |
 | **Enter** | Message box | Sends the message (or queues it while the agent is working). |
 | **Shift+Enter** | Message box | New line. |
 | **Esc** | Anywhere in the panel while the agent is working | Stops the run. |
