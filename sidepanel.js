@@ -247,12 +247,17 @@ function connectEngine() {
     for (let attempt = 0; ; attempt++) {
       // Chrome: the service worker starts the offscreen document. Elsewhere nobody answers, which is fine.
       let problem = '';
+      let answered = false;
       try {
         const r = await chrome.runtime.sendMessage({ to: TO_HOST, op: 'ensureEngine' });
+        answered = r != null;
         if (r && !r.ok) problem = r.error?.message || 'unknown error';
       } catch {}
       if (await openPort()) break;
-      if (attempt >= 2) engine.statusSeq = setStatus(problem ? `Could not start the agent (${problem}). Retrying…` : 'Connecting to the agent…', problem ? 'error' : 'info');
+      // No answer at all means the background part still runs an older version (an unpacked
+      // extension keeps its old worker until it is reloaded), so no amount of waiting helps.
+      if (!answered && attempt >= 1) problem = 'the background part is not responding — reload the extension on chrome://extensions, then reopen this panel';
+      if (attempt >= 1) engine.statusSeq = setStatus(problem ? `Could not start the agent (${problem}). Retrying…` : 'Connecting to the agent…', problem ? 'error' : 'info');
       await sleep(Math.min(2000, 150 * (attempt + 1)));
     }
   })().finally(() => (engine.connecting = null));
@@ -268,9 +273,18 @@ function openPort() {
       return resolve(false);
     }
     let up = false;
+    // A port can open without the engine ever answering (e.g. its start-up failed); don't wait forever.
+    const timer = setTimeout(() => {
+      if (up) return;
+      try {
+        port.disconnect();
+      } catch {}
+      resolve(false);
+    }, 10000);
     port.onMessage.addListener((m) => {
       if (!up && m?.t === 'snapshot') {
         up = true;
+        clearTimeout(timer);
         engine.port = port;
         engine.connected = true;
         resolve(true);
@@ -279,6 +293,7 @@ function openPort() {
     });
     port.onDisconnect.addListener(() => {
       void chrome.runtime.lastError;
+      clearTimeout(timer);
       if (!up) return resolve(false);
       if (engine.port === port) onDisconnected();
     });
