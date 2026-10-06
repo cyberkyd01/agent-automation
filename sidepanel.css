@@ -635,6 +635,51 @@ input[type='checkbox'] {
   text-decoration-color: currentColor;
 }
 
+/* First run: no model yet, so a guided card replaces the suggestions. */
+.empty-setup {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-top: 8px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
+  border-radius: 12px;
+  background: var(--accent-soft);
+}
+
+.empty-setup-num {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.empty-setup-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.empty-setup-title {
+  font-weight: 600;
+}
+
+.empty-setup-text {
+  margin: 0 0 4px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .msg {
   min-width: 0;
 }
@@ -1735,9 +1780,61 @@ body.dragging .input-box {
 #settingsBody {
   flex: 1 1 auto;
   min-height: 0;
-  padding: 4px 12px 0;
+  padding: 12px 16px 0;
+  overflow-x: hidden;
   overflow-y: auto;
+  background: var(--set-page, var(--bg));
   scrollbar-width: thin;
+}
+
+/* Home: "‹ Back to chat  Settings". A page: "‹ Settings · Computer tools  ×". */
+#closeSettings .i-close,
+#settings[data-view='page'] #closeSettings .i-back {
+  display: none;
+}
+
+#settings[data-view='page'] #closeSettings .i-close {
+  display: block;
+}
+
+#settings[data-view='page'] #closeSettings {
+  order: 3;
+  margin-left: auto;
+}
+
+.settings-back {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 28px;
+  padding: 0 6px 0 2px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--link);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.settings-back:hover {
+  background: var(--surface-2);
+}
+
+.settings-back svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.settings-sep {
+  flex: none;
+  color: var(--faint);
 }
 
 /* The bottom space is a spacer, not padding: sticky bars (Computer tools → Apply) stick inside the padding,

@@ -1,4 +1,5 @@
 import { api } from './host/api.js';
+import { isLoopback, isPrivate } from './util.js';
 
 export const PRESETS = {
   lmstudio: { name: 'LM Studio', type: 'openai', baseUrl: 'http://localhost:1234/v1' },
@@ -61,10 +62,6 @@ export async function saveSettings(s) {
   await api.storage.local.set({ settings: s });
   await syncOriginRules(s);
 }
-
-const isLoopback = (h) => h === 'localhost' || h === '[::1]' || /^127\./.test(h);
-const isPrivate = (h) =>
-  isLoopback(h) || /^10\./.test(h) || /^192\.168\./.test(h) || /^172\.(1[6-9]|2\d|3[01])\./.test(h) || /\.local$/.test(h);
 
 // Local servers (Ollama in particular) reject the chrome-extension:// Origin header.
 // Rewrite it on our own requests to local hosts so no server-side CORS setup is needed.

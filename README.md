@@ -6,11 +6,17 @@ It runs in Chrome, in other Chromium-based browsers (Chromium, Edge, Brave, Oper
 
 **[User guide](docs/USER_GUIDE.md)**: a tour of the panel, step-by-step recipes for common jobs, every setting, and troubleshooting.
 
-Version 1.2 adds:
+Version 1.3 adds:
+
+- **A redesigned Settings screen.** Settings is now a home page with a **Getting started** card and one card for each area, and every area has its own page. Computer tools and Remote access are numbered steps that tick themselves. See [The Settings screen](#the-settings-screen).
+- **Use your models from other apps.** The tunnel behind Remote access also works as an OpenAI-compatible address, so any app that lets you add such a provider can use your local models. See [Remote access](#remote-access-use-your-models-from-another-browser-or-app).
+- **Terminals and applications.** With the companion, the agent can open a terminal and keep working in it (run a command, read the answer, run the next), and it can open and change documents in TextEdit, Notepad, Excel and other applications. See [Terminals and applications](#terminals-and-applications).
+
+Version 1.2 added:
 
 - **Runs continue when the panel is closed.** The agent now works in a background part of the extension. Hiding the panel does not stop a job; a badge on the toolbar icon shows how many chats are running, and approvals and finished jobs arrive as desktop notifications. See [Runs continue when the panel is closed](#runs-continue-when-the-panel-is-closed).
 - **No step limit by default.** A run ends when the task is done or when you press Stop. A loop guard nudges the model when it repeats the same failing action. See [Long tasks](#long-tasks).
-- **Remote access.** One click in Settings opens a Cloudflare tunnel, so a browser on another computer can use your local models. See [Remote access](#remote-access-use-your-models-from-another-browser).
+- **Remote access.** One click in Settings opens a Cloudflare tunnel, so a browser on another computer can use your local models. See [Remote access](#remote-access-use-your-models-from-another-browser-or-app).
 - **Desktop tools (Linux and macOS).** With the companion, the agent can open apps, list and focus windows, take a screenshot of the whole screen, press keys and type into other programs. See [Computer tools](#computer-tools-and-local-mcp-servers-companion).
 - **Firefox and Chromium builds.** One codebase, built for Chrome, Chromium-based browsers and Firefox. See [Install](#install).
 
@@ -18,14 +24,14 @@ Requires Chrome 116 or later (or a Chromium-based browser of the same age), or F
 
 ## Install
 
-Pick the download for your browser from the [Releases page](https://github.com/cyberkyd01/agent-automation/releases/latest). Version 1.2.0 has these files:
+Pick the download for your browser from the [Releases page](https://github.com/cyberkyd01/agent-automation/releases/latest). Version 1.3.0 has these files:
 
 | File | For |
 |---|---|
-| `agent-automation-chrome-v1.2.0.zip` | Chrome |
-| `agent-automation-chromium-v1.2.0.zip` | Chromium, Edge, Brave and Opera. It is the same build as the Chrome one, in its own file. |
-| `agent-automation-firefox-v1.2.0.zip` and `agent-automation-firefox-v1.2.0.xpi` | Firefox |
-| `agent-companion.mjs` | Optional: computer tools, desktop tools and remote access (see [Computer tools](#computer-tools-and-local-mcp-servers-companion)) |
+| `agent-automation-chrome-v1.3.0.zip` | Chrome |
+| `agent-automation-chromium-v1.3.0.zip` | Chromium, Edge, Brave and Opera. It is the same build as the Chrome one, in its own file. |
+| `agent-automation-firefox-v1.3.0.zip` and `agent-automation-firefox-v1.3.0.xpi` | Firefox |
+| `agent-companion.mjs` | Optional: computer tools, terminals, desktop and application tools, and remote access (see [Computer tools](#computer-tools-and-local-mcp-servers-companion)) |
 
 ### Chrome and other Chromium-based browsers
 
@@ -40,7 +46,7 @@ Chrome only installs `.crx` files that come from the Chrome Web Store, which is 
 
 ### Firefox
 
-1. Download `agent-automation-firefox-v1.2.0.xpi` (or the zip).
+1. Download `agent-automation-firefox-v1.3.0.xpi` (or the zip).
 2. Open `about:debugging#/runtime/this-firefox`.
 3. Click **Load Temporary Add-on…** and pick the `.xpi`. If you built it from source, pick `manifest.json` in `dist/firefox`. The sidebar opens by itself.
 4. The toolbar button, or **Ctrl+Shift+Y** (Mac: **Cmd+Shift+Y**), opens and closes the sidebar. If the shortcut does nothing, set another one in `about:addons` (gear menu, **Manage Extension Shortcuts**).
@@ -53,7 +59,7 @@ Chrome only installs `.crx` files that come from the Chrome Web Store, which is 
 
 Limits in Firefox (the Firefox build also declares to Firefox that it collects no data):
 
-- **Trusted input events** (Settings → Behaviour) is not available, and neither is the fallback for pages whose security policy blocks scripts. Both need Chrome's debugger API.
+- **Trusted input events** (Settings → Behaviour → Advanced) is not available, and neither is the fallback for pages whose security policy blocks scripts. Both need Chrome's debugger API.
 - Approval notifications have no **Allow** and **Deny** buttons. Clicking one opens the panel in a browser tab (not the sidebar), on the chat that needs an answer.
 - In Firefox 128 to 151, the `screenshot` tool only works on a tab where you clicked the toolbar button or pressed the shortcut. From Firefox 152 it works on every tab. `read_page` is not affected.
 
@@ -67,6 +73,8 @@ After editing a file, run the build again if you use `dist/…`, then press the 
 
 ## Connect a model
 
+Until a model is set up, a new chat shows **Connect a model to start**. Click its **Open Models & providers** button, or open Settings (the sliders icon) and click the **Models & providers** card. Click **Test connection** on your provider, then choose a model in the panel header.
+
 ### LM Studio (preconfigured)
 
 Load a model, open the **Developer** tab and start the server. The extension uses the default address `http://localhost:1234/v1`.
@@ -79,15 +87,25 @@ You do not need to set `OLLAMA_ORIGINS`. The extension rewrites the Origin heade
 
 ### Cloud providers
 
-Settings → **Add provider** → choose a preset → paste the API key → **Test connection**.
+Settings → **Models & providers** → in the **Add a provider** card, open the **Add provider…** list and choose a preset → paste the API key → **Test connection**. A working provider shows a green **Connected · N models** badge.
 
-Presets: OpenAI, Anthropic, Google Gemini, OpenRouter, Groq, Mistral, DeepSeek, xAI, Together AI. For models on another computer, use **Add from connection code** (see [Remote access](#remote-access-use-your-models-from-another-browser)).
+Presets: OpenAI, Anthropic, Google Gemini, OpenRouter, Groq, Mistral, DeepSeek, xAI, Together AI. For models on another computer, use **Add from connection code** (see [Remote access](#remote-access-use-your-models-from-another-browser-or-app)).
 
 For any other service with an OpenAI-style `/chat/completions` endpoint, choose **Custom (OpenAI-compatible)** and enter its base URL (the part before `/chat/completions`, for example `https://example.com/v1`).
 
 ### Choose a model
 
 Pick the provider and model in the panel header. The reload button refreshes the model list from the server. If your model isn't listed, choose **Custom model ID…** and type it in.
+
+Models that are already loaded in LM Studio are listed first and marked "loaded"; picking an unloaded one makes LM Studio load it, which can take a while.
+
+### The Settings screen
+
+Settings opens on a home page. A **Getting started** card at the top has three steps (1 **Connect a model**, 2 **Try a task**, 3 **Optional: computer tools, remote access**) that tick themselves, with a button for each. Below it is one card for each area, each with a status pill: **Models & providers**, **Images**, **Behaviour**, **Computer tools**, **Remote access**, **Remote MCP servers** and **About & help**.
+
+<img src="docs/images/settings-home.png" alt="The Settings home page: a Getting started card with three numbered steps (Connect a model, Try a task, Optional: computer tools, remote access), then cards for Models & providers (amber pill 'No model chosen'), Images (grey pill 'Off') and Behaviour (blue pill 'Ask before acting · no step limit'), each with an icon and a one-line purpose." width="400">
+
+Click a card to open that area on its own page. **‹ Settings** at the top left goes back to the home page, and **Esc** does the same (on the home page, **Esc** closes Settings). Each page starts with **What this does**, groups its controls into cards, and folds the settings you rarely need under **Advanced** (on Behaviour: temperature, context budget, max tool output, trusted input events; on Remote access: the named tunnel). Changes are saved automatically.
 
 ## Local models: context window and tool calling
 
@@ -99,7 +117,7 @@ Pick the provider and model in the panel header. The reload button refreshes the
 - **Prefer models trained for tool calling**, for example the Qwen, Llama 3.1+, Mistral/Devstral and GPT-OSS families.
 - Models without native tool calling still work. The extension switches automatically to a "prompted" mode where the model writes tool calls as text, but this is less reliable.
 - Vision-capable models can also look at screenshots of the page and at attached images.
-- With a small-context model, lower **Context budget** in Settings so older parts of the conversation are trimmed sooner.
+- With a small-context model, lower **Context budget** (Settings → Behaviour → Advanced) so older parts of the conversation are trimmed sooner.
 
 ## What it can do
 
@@ -115,7 +133,9 @@ Pick the provider and model in the panel header. The reload button refreshes the
 | Images | generate, edit, view, preview on the page |
 | Remote MCP | any tools from the MCP servers you add |
 | Computer | with the companion connected, tools named `mcp_computer_…`: run commands, read and write files, clipboard, and more (see below) |
-| Desktop | with the companion on Linux or macOS: list and launch apps, list, focus and close windows, screenshot the whole screen, press keys and type into other programs |
+| Desktop | with the companion on Linux or macOS (Windows: untested): list and launch apps, list, focus and close windows, screenshot the whole screen, press keys and type into other programs |
+| Terminal | with the companion: `terminal_open`, `terminal_send`, `terminal_read`, `terminal_interrupt`, `terminal_list`, `terminal_close`: a shell that stays open, so the agent can run a command, read the reply and go on |
+| Applications | with the companion: `app_open_file`, `app_read_text`, `app_write_text`, and `run_applescript` (macOS) or `run_powershell` (Windows): open a file in its application, read and change the text in TextEdit, Notepad, Excel and other apps |
 
 ## Example prompts
 
@@ -203,7 +223,7 @@ Limits:
 
 ## Images
 
-Settings → **Image generation**: choose a provider and an image model, then a mode:
+Settings → **Images**: choose a provider (the default, **None (image tools off)**, keeps the image tools off) and an image model, then a mode:
 
 - **Images API**: for OpenAI-style `/images/generations` and `/images/edits` endpoints (OpenAI, LocalAI and similar).
 - **Chat completions with image output**: for multimodal chat models that return images, for example Gemini image models via OpenRouter.
@@ -221,28 +241,34 @@ By default the agent can only work inside the browser. The **companion** is a sm
 It provides:
 
 - **Built-in tools:** run commands, read and write files, list and find files, open files, folders, apps and URLs, read and write the clipboard, and show system information.
-- **Desktop tools (Linux and macOS):** `list_apps`, `launch_app`, `list_windows`, `focus_window`, `close_window`, `desktop_screenshot`, `send_keys` and `type_in_app`. They let the agent work with other programs on your screen. Windows has no desktop tools yet.
+- **Desktop tools (Linux and macOS):** `list_apps`, `launch_app`, `list_windows`, `focus_window`, `close_window`, `desktop_screenshot`, `send_keys` and `type_in_app`. They let the agent work with other programs on your screen. On Windows they run through PowerShell and are untested.
+- **Terminal sessions and application tools:** shells that stay open, and tools to read and change what is in TextEdit, Notepad, Excel and other apps. See [Terminals and applications](#terminals-and-applications).
 - **Local MCP servers:** programs that speak MCP over stdio (started with `npx`, `uvx`, `docker` and similar). The companion starts them and passes their tools to the agent.
-- **Remote access:** the Cloudflare tunnel described [below](#remote-access-use-your-models-from-another-browser).
+- **Remote access:** the Cloudflare tunnel described [below](#remote-access-use-your-models-from-another-browser-or-app).
 
 It needs [Node.js](https://nodejs.org) 18 or later and nothing else.
 
 ### Set up
 
-1. Install Node.js 18 or later.
-2. Download `agent-companion.mjs` from the [Releases page](https://github.com/cyberkyd01/agent-automation/releases/latest).
-3. In a terminal, go to the folder with that file and run `node agent-companion.mjs`.
-4. Copy the token it prints into Settings → **Computer tools** → **Token**, and switch **Enabled** on.
-5. Click **Test connection**. A working setup shows the companion's version, platform, user and how many tools it offers.
+Settings → **Computer tools** is a numbered checklist. Each step ticks itself when it is done and then folds to one line, and a step that fails is highlighted with the reason.
 
-To start the companion every time you log in, run `node agent-companion.mjs --install-autostart` once. This is tested on macOS; the Linux and Windows versions are written but untested.
+<img src="docs/images/settings-computer-tools.png" alt="Settings, Computer tools page, with the companion not running: step 1 'Install Node.js 18 or later' folded, step 2 'Run the companion' open and highlighted with the command 'node agent-companion.mjs' and a Copy button, the Address field, a Check button and a yellow message 'Not running at … Start it with the command above, then click Check.'" width="400">
+
+1. **Install Node.js 18 or later.**
+2. **Run the companion.** Download `agent-companion.mjs` from the [Releases page](https://github.com/cyberkyd01/agent-automation/releases/latest). In a terminal, go to the folder with that file and run `node agent-companion.mjs` (Settings has a **Copy** button for the command), and leave that window open. The **Address** is already filled in; **Check** tells you whether the companion answers.
+3. **Paste the token and switch it on.** Copy the token the companion printed into **Token**, switch **Enabled** on, leave **Approval** on **Always ask before computer tools (recommended)**, and click **Test connection**. A working setup shows the companion's version, platform, user and how many tools it offers.
+4. **Choose what it may do.** Appears once the connection works: **Desktop tools**, and **Commands and files** (**Allow shell commands**, **Allow writing files**, **Command timeout (seconds)** and **Terminal sessions**).
+5. **Local MCP servers** (optional). See below.
+
+To start the companion every time you log in, run `node agent-companion.mjs --install-autostart` once (step 2 shows the command with a **Copy** button). This is tested on macOS; the Linux and Windows versions are written but untested.
 
 ### Local MCP servers
 
-Once the connection works, Settings → **Computer tools** shows the companion's own settings:
+Once the connection works, steps 4 and 5 of Settings → **Computer tools** show the companion's own settings:
 
-- **Local MCP servers (stdio):** click **Add server** and fill in the name, command, arguments, environment and working directory, or click **Paste JSON** and paste an entry from an MCP server's documentation, in the Claude Desktop `mcpServers` format. Then click **Apply**. Nothing changes on the companion until you apply, and **Discard changes** takes you back. Each server's card shows whether it is running, and its error text if it failed.
-- **Allow shell commands** and **Allow writing files** switch off the riskiest tools. Without shell commands the agent cannot run commands or open files and apps; without file writing it can only read files.
+- **Local MCP servers:** click **Add server** and fill in the name, command, arguments, environment and working directory, or click **Paste JSON** and paste an entry from an MCP server's documentation, in the Claude Desktop `mcpServers` format. Then click **Apply**. Nothing changes on the companion until you apply, and **Discard changes** takes you back. Each server's card shows whether it is running, and its error text if it failed.
+- **Allow shell commands** and **Allow writing files** switch off the riskiest tools. Without shell commands the agent cannot run commands, open files and apps, use terminal sessions or run AppleScript and PowerShell; without file writing it can only read files.
+- **Terminal sessions:** the open sessions, a **Close all** button and **Close idle sessions after (minutes)** (30 by default).
 
 ### Desktop tools
 
@@ -254,25 +280,59 @@ Settings → Computer tools → **Desktop tools** has an **Enabled** switch, and
 
 Every desktop tool asks for approval. Details for each system are in the [user guide](docs/USER_GUIDE.md#desktop-tools).
 
+### Terminals and applications
+
+Version 1.3 lets the agent work step by step in a terminal or inside an application: send a command or a change, read what came back, then decide the next step.
+
+- **Terminal sessions** (need **Allow shell commands**). The agent opens a shell that stays open and keeps its folder and settings, types commands and reads the replies. Python, `ssh` and installers that ask questions work. It can wait for a prompt, stop a stuck command and close the session. Full-screen programs (`vim`, `top`, `less`) do not work. Idle sessions close after 30 minutes. On macOS and Linux it is a real terminal; on Windows it is PowerShell over pipes and untested. If you want to watch, on a Mac it can run commands in your own Terminal window instead.
+- **Applications** (need **Desktop tools**). The agent opens a file in its application and reads or pastes text into any editor window (TextEdit, Notepad, gedit, VS Code), using the clipboard; your clipboard text is put back, but a copied image is lost. On a Mac, AppleScript controls TextEdit, Excel, Numbers, Mail and more (the first use makes macOS ask for permission). On Windows, PowerShell controls Excel and Word (untested). On Linux it uses LibreOffice from the command line.
+- Every call asks for approval, like all computer tools.
+
+Examples:
+
+- "Open a terminal, go to ~/exports, zip yesterday's CSV files and tell me the size."
+- "Start Python in a terminal and compute the VAT on these three amounts: …"
+- "Run `npm test` in my project folder and tell me what failed."
+- "Open the spreadsheet ~/Documents/prices.xlsx in Excel, add 10% to column C and save."
+- "Open TextEdit, paste the product description from this page and save it as ~/Desktop/product.txt."
+- "In Notepad, read what I typed and fix the spelling."
+
+More in the [user guide](docs/USER_GUIDE.md#terminal-sessions) and in [`companion/README.md`](companion/README.md#terminal-sessions).
+
 Details, options and troubleshooting are in [`companion/README.md`](companion/README.md).
 
-## Remote access: use your models from another browser
+## Remote access: use your models from another browser or app
 
-You can reach the models on your home or office computer from a browser somewhere else, for example your laptop. The companion starts a [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/) for you, so you need no Cloudflare account and no router settings.
+You can reach the models on your home or office computer from a browser somewhere else, for example your laptop, or from any app that can talk to an OpenAI-compatible address. The companion starts a [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/) for you, so you need no Cloudflare account and no router settings.
 
-<img src="docs/images/remote-access.png" alt="Settings, Remote access section: a green Running badge, the public link, the connection code hidden behind dots with Show and Copy buttons, three checkboxes (Expose local models ticked), and the list of local models with LM Studio ticked." width="400">
+Settings → **Remote access** is a four-step page: 1 **Connect computer tools**, 2 **Choose what to share**, 3 **Start the tunnel**, 4 **Use it**. Each step ticks itself when it is done. Without a working companion it says "Remote access runs through the companion, so connect computer tools first."
 
-1. On the computer that runs the models, connect the companion (see [Set up](#set-up)) and open Settings → **Remote access**.
-2. Click **Start tunnel**. The first time, the companion downloads its own private copy of `cloudflared` (about 40 MB).
-3. Under **Expose these local models**, tick the models to share. **Expose local models** is on by default; **Expose computer tools** is off.
-4. Copy the **Connection code** (use **Show** or **Copy**).
-5. In the other browser, install the extension, open Settings → Providers → **Add from connection code**, paste the code and click **Add**. It adds one provider per shared model, named like `LM Studio (remote)`. Pick it in the panel header.
+<img src="docs/images/remote-access.png" alt="Settings, Remote access page, lower part of step 4 'Use it': under 'Use with other apps' a block for the shared model 'LM-Studio' shows a Base URL (https://quiet-fox-lake-river.trycloudflare.com/llm/LM-Studio) with a Copy button, an API key hidden as dots with Show and Copy buttons, and a Model note; below it a folded 'curl example' with a ready command, and a folded 'Advanced' block." width="400">
+
+**On the computer that runs the models**
+
+1. Connect computer tools (see [Set up](#set-up)). On the Remote access page, step 1 turns into a green tick.
+2. Step 2, **Choose what to share**: **Expose local models** is on by default, and your local models are ticked for you the first time ("Your local models were added to the list; untick any you don't want to share."). Untick any you do not want to share. **Expose computer tools** is off; leave it off unless you need it.
+3. Step 3, **Start the tunnel**: click **Start tunnel**. The first time, the companion downloads its own private copy of `cloudflared` (about 40 MB).
+4. Step 4, **Use it**: copy the **Connection code** (use **Show** or **Copy**).
+
+**On the other computer (another copy of the extension)**
+
+1. Install the extension, and open Settings → **Models & providers** → **Add from connection code**.
+2. Paste the code and click **Add**. It adds one provider for each shared model, named `<name> (remote)`, for example `LM-Studio (remote)`.
+3. In the panel header, `<name> (remote)` is already selected and its models load by themselves (click the reload button if the list stays empty). Choose a model.
+
+**In any other app that speaks the OpenAI API**
+
+1. In step 4, under **Use with other apps**, find the block of the model you want. It shows the three values below.
+2. In the app, add an OpenAI-compatible provider. **Base URL**: `https://<link>/llm/<name>` (with or without `/v1` at the end). **API key**: the companion's token (**Show** or **Copy**). **Model**: choose it from the app's own model list after you enter the URL and the key.
+3. To check from a terminal: `curl -H "Authorization: Bearer $TOKEN" https://<link>/llm/<name>/models`. Chat pages that run in a browser work too.
 
 Know before you use it:
 
-- **Anyone who has both the link and the token can use what you share.** Treat the connection code like a password, and stop the tunnel when you are not using it. Settings and the tunnel controls only work on the computer that runs the companion. After 10 wrong tokens, a client is blocked for 15 minutes.
+- **Anyone who has both the link and the token can use what you share.** Treat the connection code and the API key like a password, give them only to people you trust, and stop the tunnel when you are not using it. Settings and the tunnel controls only work on the computer that runs the companion. After 10 wrong tokens, a client is blocked for 15 minutes.
 - **The tunnel is separate from any other Cloudflare setup** on that computer: the companion uses its own `cloudflared` copy and its own configuration, never touches `~/.cloudflared`, and never changes services or accounts. **Stop tunnel** ends only its own process.
-- **The link changes** every time a quick tunnel starts, so paste the new code into the other browser. A named tunnel (Advanced, with its token and public address) keeps one address.
+- **The link changes** every time a quick tunnel starts, so paste the new code into the other browser (or change the Base URL in the app). A named tunnel (under **Advanced** on the Remote access page, with its token and public address) keeps one address.
 - **Cloudflare quick tunnels have no uptime guarantee.** An answer that has not started after about 100 seconds fails with an error 524, so use models that stream their reply.
 
 More in the [user guide](docs/USER_GUIDE.md#remote-access) and [`companion/README.md`](companion/README.md#remote-access-cloudflare-tunnel).
@@ -284,7 +344,7 @@ More in the [user guide](docs/USER_GUIDE.md#remote-access) and [`companion/READM
 - The **Stop** button (or **Esc**) halts a run at any point.
 - Page content is treated as data, not instructions, but no model is immune to prompt injection. Be careful with **Act without asking** on sites you don't control, and review replies before letting the agent send messages to customers.
 - API keys are stored unencrypted in the extension's local storage on this computer. They are sent only to the provider you configured them for.
-- **Trusted input events** (Settings → Behaviour) uses Chrome's debugger to send real mouse and keyboard events, for sites that ignore simulated ones. Chrome shows a debugging banner at the top of the window while it is active. The debugger is also used to run scripts on pages whose security policy blocks them, so the banner can appear then too. Firefox does not have Chrome's debugger API, so neither feature works there.
+- **Trusted input events** (Settings → Behaviour → Advanced) uses Chrome's debugger to send real mouse and keyboard events, for sites that ignore simulated ones. Chrome shows a debugging banner at the top of the window while it is active. The debugger is also used to run scripts on pages whose security policy blocks them, so the banner can appear then too. Firefox does not have Chrome's debugger API, so neither feature works there.
 - Chats and attached files are stored unencrypted in the browser profile on this computer. Delete a chat in History to remove it and its files.
 
 ### Computer tools
@@ -312,10 +372,16 @@ Computer tools run with the permissions of your user account. They can read, cha
 | No notification when the panel is closed | Settings → Behaviour → **Desktop notifications** is off, a panel is open in another window, or your operating system blocks notifications from the browser. |
 | Firefox: no page can be read, or the extension is gone after a restart | Click **Allow access** in the panel's banner. A temporary add-on is removed when Firefox quits; see [Firefox](#firefox). |
 | Firefox: the screenshot tool fails | In Firefox 128 to 151, click the toolbar button on that tab first, or use `read_page`. |
-| "The companion is not running at …" | Start it with `node agent-companion.mjs`, and check the address in Settings → Computer tools. |
+| "The companion is not running at …" | Start it with `node agent-companion.mjs`, and check the **Address** in Settings → Computer tools (step 2) with **Check**. |
 | A local MCP server shows an error | Its card in Settings → Computer tools shows the error text. The usual cause is a wrong command path; use the full path to the program. |
 | A desktop tool is missing | Settings → Computer tools → Desktop tools lists the missing helpers and what to install. |
+| No terminal tools | **Allow shell commands** is off in Settings → Computer tools. Terminal sessions, `run_applescript` and `run_powershell` need it. |
 | The tunnel will not start | See [`companion/README.md`](companion/README.md#troubleshooting). |
+| The chat says **Connect a model to start** | No provider has a model yet. Click **Open Models & providers**, click **Test connection** on your provider, and choose a model in the header. |
+| Remote access: "has nothing to add" (when you paste a connection code) | No model is shared. On the model computer, Settings → Remote access, step 2: turn on **Expose local models** and tick at least one model, then copy the code again. |
+| Remote access: error 401 | Wrong token. Paste the current connection code, or, in another app, use the companion's token as the API key. |
+| Remote access: the link changed | A quick tunnel gets a new link each time it starts. Paste the new connection code (Settings → Models & providers → **Add from connection code**), or change the Base URL in the app. |
+| Remote access: error 524 from Cloudflare | The reply took more than about 100 seconds to start. Use a model and an app setting that stream the reply, or a smaller model. |
 
 ## Project layout
 
@@ -325,7 +391,7 @@ Computer tools run with the permissions of your user account. They can read, cha
 | `background.js` | Chrome service worker: opens the side panel, makes the browser calls for the engine, sets the toolbar badge and shows notifications |
 | `offscreen.html` | Chrome page that hosts the agent engine, so jobs go on while the panel is closed |
 | `sidepanel.html`, `sidepanel.css`, `sidepanel.js` | Side panel UI: chat tabs, queue, History, batch dialog. It is a view of the engine. |
-| `settings-tools.css` | Styles for the Computer tools and Remote access settings |
+| `settings-tools.css` | Styles for the Settings home page and area pages |
 | `src/engine/` | The engine that owns the chats, queues and runs; `PROTOCOL.md` describes how the panel talks to it |
 | `src/host/` | `api.js`: one interface to the browser APIs, used by the engine in Chrome and in Firefox |
 | `src/agent.js` | Agent loop, including the loop guard |
@@ -336,8 +402,8 @@ Computer tools run with the permissions of your user account. They can read, cha
 | `src/mcp.js` | MCP client |
 | `src/files.js` | Attached files: type detection and text extraction |
 | `src/sessions.js` | Saved chats: storage, export and import |
-| `src/settings-ui.js` | Settings screen |
-| `src/settings-tools-ui.js` | Computer tools, Remote access and Remote MCP settings |
+| `src/settings-ui.js` | Settings: the home page and the Models & providers, Images, Behaviour, Remote MCP servers and About & help pages |
+| `src/settings-tools-ui.js` | The Computer tools and Remote access pages, Add from connection code, and the Remote MCP server test |
 | `src/markdown.js` | Markdown rendering for chat messages |
 | `src/storage.js` | Settings, defaults and provider presets |
 | `src/util.js` | Shared helpers |
@@ -352,7 +418,7 @@ Computer tools run with the permissions of your user account. They can read, cha
 
 ## Feedback
 
-If the extension is useful, star it on [GitHub](https://github.com/cyberkyd01/agent-automation). The same link is in Settings → About → **Rate on GitHub**.
+If the extension is useful, star it on [GitHub](https://github.com/cyberkyd01/agent-automation). The same link is in Settings → About & help → **Rate on GitHub**.
 
 Report bugs and request features through [Issues](https://github.com/cyberkyd01/agent-automation/issues).
 

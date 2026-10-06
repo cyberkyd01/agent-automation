@@ -72,6 +72,11 @@ export const withExt = (base, mime) => (extFor(mime) ? `${base}.${extFor(mime)}`
 
 export const newId = () => crypto.randomUUID().replace(/-/g, '').slice(0, 10);
 
+// Host names (URL.hostname) of this computer and of the local network.
+export const isLoopback = (h) => h === 'localhost' || h === '[::1]' || /^127\./.test(h);
+export const isPrivate = (h) =>
+  isLoopback(h) || /^10\./.test(h) || /^192\.168\./.test(h) || /^172\.(1[6-9]|2\d|3[01])\./.test(h) || /\.local$/.test(h);
+
 export function safeParse(s, fallback = {}) {
   if (s && typeof s === 'object') return s;
   try {
@@ -149,6 +154,32 @@ export async function* sseEvents(res) {
   }
 }
 
+// An HTML error page (a proxy's, or Cloudflare's when a tunnel is down) becomes one readable line, not markup.
+function htmlErrorText(html, res) {
+  const plain = (s) =>
+    s
+      .replace(/<[^>]*>/g, ' ')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/\s+/g, ' ')
+      .trim();
+  const title = plain(/<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1] || '');
+  let host = '';
+  try {
+    host = new URL(res.url).host;
+  } catch {}
+  // Cloudflare answers 530 / error 1033 for a tunnel whose cloudflared is not connected (stopped, or a quick
+  // tunnel's old link after a restart).
+  if (res.status === 530 || /Cloudflare Tunnel error/i.test(title) || /errorCode:\s*1033\b/.test(html)) {
+    return `The Cloudflare tunnel${host ? ` at ${host}` : ''} is not running (Cloudflare error 1033). On the computer that shares the model, start it again in Settings → Remote access. A quick tunnel gets a new link each time it starts: then add its new connection code here (Settings → Models & providers → Add from connection code).`;
+  }
+  return `${title || res.statusText || 'Error'}${host ? ` (an error page from ${host})` : ''}`;
+}
+
 export async function httpError(res) {
   let text = '';
   try {
@@ -158,7 +189,9 @@ export async function httpError(res) {
   try {
     const j = JSON.parse(text);
     msg = j.error?.message || (typeof j.error === 'string' ? j.error : '') || j.message || text;
-  } catch {}
+  } catch {
+    if (/^\s*(<!doctype html|<html)/i.test(text) || /<\/(head|body|title)>/i.test(text)) msg = htmlErrorText(text, res);
+  }
   const e = new Error(`HTTP ${res.status}: ${String(msg).slice(0, 600) || res.statusText}`);
   e.status = res.status;
   return e;

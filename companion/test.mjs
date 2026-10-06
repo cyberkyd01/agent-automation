@@ -8,6 +8,8 @@
 // COMPANION_TEST_TUNNEL=1 (a real quick tunnel through the installed cloudflared, stopped afterwards),
 // COMPANION_TEST_DOWNLOAD=1 (downloads the real cloudflared into a temp folder, which is deleted afterwards),
 // COMPANION_TEST_DESKTOP=1 (macOS: runs list_apps, list_windows and desktop_screenshot for real; nothing is typed).
+// Terminal sessions run real shells (bash, zsh, python3 -i, cat, sleep) as hidden processes in temp folders; the
+// application tools use stand-in helpers, except run_applescript, which runs "return 1 + 1" once on macOS.
 
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -247,6 +249,7 @@ describe('CLI and startup', () => {
         tunnel: { autostart: false, kind: 'quick', hasNamedToken: false, exposeLlm: true, exposeMcp: false, namedUrl: null },
         llmUpstreams: {},
         desktopTools: true,
+        terminalIdleMinutes: 30,
       });
       await waitUntil(() => /allowShell/.test(c.err()) && /Skipping an MCP server/.test(c.err()), 3000, 'the warnings');
     } finally {
@@ -729,13 +732,13 @@ describe('settings', () => {
     assert.match(w.text, /allowWrite/);
     assert.equal(fs.existsSync(path.join(c.home, 'x.txt')), false);
     const s = await status(c);
-    assert.deepEqual(s.config, { allowShell: false, allowWrite: false, commandTimeoutSec: 120 });
+    assert.deepEqual(s.config, { allowShell: false, allowWrite: false, commandTimeoutSec: 120, terminalIdleMinutes: 30 });
     assert.ok(!s.tools.some((t) => t.name === 'run_command'));
   });
 
   test('GET /config never includes the token', async () => {
     const r = await request(c, 'GET', '/config');
-    assert.deepEqual(Object.keys(r.json).sort(), ['allowShell', 'allowWrite', 'commandTimeoutSec', 'desktopTools', 'llmUpstreams', 'mcpServers', 'tunnel']);
+    assert.deepEqual(Object.keys(r.json).sort(), ['allowShell', 'allowWrite', 'commandTimeoutSec', 'desktopTools', 'llmUpstreams', 'mcpServers', 'terminalIdleMinutes', 'tunnel']);
     assert.ok(!r.text.includes(c.token));
   });
 
@@ -771,7 +774,7 @@ describe('settings', () => {
   test('PUT /config applies, persists (keeping the token) and returns the status', async () => {
     const r = await request(c, 'PUT', '/config', { body: { allowShell: true, commandTimeoutSec: 45 } });
     assert.equal(r.status, 200, r.text);
-    assert.deepEqual(r.json.config, { allowShell: true, allowWrite: false, commandTimeoutSec: 45 });
+    assert.deepEqual(r.json.config, { allowShell: true, allowWrite: false, commandTimeoutSec: 45, terminalIdleMinutes: 30 });
     assert.ok(Array.isArray(r.json.tools) && Array.isArray(r.json.servers));
     assert.ok(r.json.tools.some((t) => t.name === 'run_command' && t.server === 'builtin'));
     const saved = JSON.parse(fs.readFileSync(path.join(c.state, 'companion.json'), 'utf8'));
@@ -1591,6 +1594,10 @@ function startUpstream() {
           }
         }, 300);
         res.on('close', () => clearInterval(t));
+      } else if (req.url === '/v1' || req.url === '/v1/') {
+        // Like LM Studio: nothing at the base URL itself.
+        res.writeHead(404, { 'content-type': 'application/json' });
+        res.end('{"error":"Unexpected endpoint or method."}');
       } else if (req.url.startsWith('/v1/forever')) {
         res.writeHead(200, { 'content-type': 'text/event-stream' });
         res.write('data: first\n\n');
@@ -1598,7 +1605,7 @@ function startUpstream() {
         res.on('close', () => clearInterval(t));
       } else {
         const out = JSON.stringify({ method: req.method, url: req.url, headers: req.headers, size: body.length, sha: crypto.createHash('sha256').update(body).digest('hex') });
-        res.writeHead(418, { 'content-type': 'application/x-teapot', 'x-upstream': 'yes', 'access-control-allow-origin': '*' });
+        res.writeHead(418, { 'content-type': 'application/x-teapot', 'x-upstream': 'yes', 'access-control-allow-origin': 'https://upstream.example', vary: 'Accept-Encoding' });
         res.end(out);
       }
     });
@@ -1612,7 +1619,7 @@ describe('LLM proxy', () => {
   before(async () => {
     up = await startUpstream();
     c = await startCompanion({
-      config: { llmUpstreams: { up: { url: `${up.url}/v1` }, keyed: { url: `${up.url}/v1`, apiKey: 'sk-upstream-key' }, down: { url: 'http://127.0.0.1:9/v1' } } },
+      config: { llmUpstreams: { up: { url: `${up.url}/v1` }, keyed: { url: `${up.url}/v1`, apiKey: 'sk-upstream-key' }, down: { url: 'http://127.0.0.1:9/v1' }, plain: { url: up.url } } },
     });
   });
   after(async () => {
@@ -1649,7 +1656,9 @@ describe('LLM proxy', () => {
     assert.equal(r.status, 418);
     assert.equal(r.headers['content-type'], 'application/x-teapot');
     assert.equal(r.headers['x-upstream'], 'yes');
-    assert.equal(r.headers['access-control-allow-origin'], undefined);
+    // The model server's own CORS headers are replaced by the companion's; its Vary is kept.
+    assert.equal(r.headers['access-control-allow-origin'], '*');
+    assert.equal(r.headers.vary, 'Accept-Encoding, Origin');
     const seen = JSON.parse(r.text);
     assert.equal(seen.method, 'PUT');
     assert.equal(seen.url, '/v1/echo/deep?a=1&b=two%20words');
@@ -1709,6 +1718,87 @@ describe('LLM proxy', () => {
     });
     await waitUntil(() => up.seen.length > before && up.seen.at(-1).aborted, 5000, 'the upstream request to be aborted');
   });
+
+  test('paths as other apps build them: a duplicate /v1 is dropped; /llm/<name> answers', async () => {
+    const via = async (p, opts) => JSON.parse((await request(c, opts?.method || 'GET', p, opts)).text);
+    // Base URL ends with /v1: with or without /v1 in the request, the same upstream path.
+    assert.equal((await via('/llm/up/models')).url, '/v1/models');
+    assert.equal((await via('/llm/up/v1/models')).url, '/v1/models');
+    assert.equal((await via('/llm/up/v1/chat/completions', { method: 'POST', body: { model: 'm' } })).url, '/v1/chat/completions');
+    assert.equal((await via('/llm/up/v1/models?x=1')).url, '/v1/models?x=1');
+    assert.equal((await via('/llm/up/v1x/models')).url, '/v1/v1x/models', 'only a whole "v1" segment is dropped');
+    // Base URL without /v1: nothing is dropped.
+    assert.equal((await via('/llm/plain/v1/models')).url, '/v1/models');
+    // /llm/<name>, /llm/<name>/ and /llm/<name>/v1: the upstream's answer, or a small index when it has none.
+    for (const p of ['/llm/up', '/llm/up/', '/llm/up/v1', '/llm/up/v1/']) {
+      const r = await request(c, 'GET', p);
+      assert.equal(r.status, 200, p);
+      assert.deepEqual(r.json, { ok: true, name: 'up', endpoints: ['/llm/up/models', '/llm/up/chat/completions', '/llm/up/completions', '/llm/up/embeddings'] }, p);
+      assert.equal(r.headers['access-control-allow-origin'], '*', p);
+    }
+    const plain = await request(c, 'GET', '/llm/plain');
+    assert.equal(plain.status, 418);
+    assert.equal(JSON.parse(plain.text).url, '/');
+    // Other 404s from the model server pass through unchanged.
+    assert.equal((await request(c, 'GET', '/llm/up/nothing-here')).status, 418);
+    const noName = await request(c, 'GET', '/llm/');
+    assert.equal(noName.status, 404);
+    assert.match(noName.json.error, /Use \/llm\/<name>/);
+  });
+
+  test('CORS for the model proxy: preflight 204, headers on every answer, any origin with a valid token', async () => {
+    const pre = await request(c, 'OPTIONS', '/llm/up/v1/chat/completions', {
+      auth: false,
+      headers: { origin: 'https://chat.example.app', 'access-control-request-method': 'POST', 'access-control-request-headers': 'authorization, content-type, x-stainless-os' },
+    });
+    assert.equal(pre.status, 204);
+    assert.equal(pre.text, '');
+    assert.equal(pre.headers['access-control-allow-origin'], '*');
+    assert.equal(pre.headers['access-control-allow-headers'], 'Authorization, Content-Type, Accept, OpenAI-Organization, X-Requested-With, x-stainless-os');
+    assert.equal(pre.headers['access-control-allow-methods'], 'GET, POST, OPTIONS');
+    assert.equal(pre.headers['access-control-max-age'], '600');
+    assert.equal(pre.headers.vary, 'Origin');
+    const bare = await request(c, 'OPTIONS', '/llm/up/models', { auth: false });
+    assert.equal(bare.headers['access-control-allow-headers'], 'Authorization, Content-Type, Accept, OpenAI-Organization, X-Requested-With');
+    assert.equal(up.seen.filter((s) => s.method === 'OPTIONS').length, 0, 'preflights are answered by the companion');
+
+    const web = { origin: 'https://chat.example.app' };
+    const ok = await request(c, 'GET', '/llm/up/models', { headers: web });
+    assert.equal(ok.status, 418);
+    assert.equal(ok.headers['access-control-allow-origin'], '*');
+    const sse = await request(c, 'POST', '/llm/up/stream', { headers: web, body: { stream: true } });
+    assert.equal(sse.status, 200);
+    assert.equal(sse.headers['access-control-allow-origin'], '*');
+    assert.match(sse.text, /\[DONE\]/);
+    // Errors carry the headers too, so web apps can show them.
+    for (const [p, auth, status] of [['/llm/up/models', 'wrong', 401], ['/llm/nope/models', true, 404], ['/llm/down/models', true, 502]]) {
+      const r = await request(c, 'GET', p, { auth, headers: web });
+      assert.equal(r.status, status, p);
+      assert.equal(r.headers['access-control-allow-origin'], '*', p);
+      assert.equal(r.headers.vary, 'Origin', p);
+    }
+    // Everything else keeps the strict rules.
+    for (const p of ['/mcp', '/status', '/config', '/tunnel/status', '/health']) {
+      const r = await request(c, 'OPTIONS', p, { auth: false, headers: { origin: 'https://chat.example.app', 'access-control-request-method': 'POST' } });
+      assert.equal(r.status, 403, p);
+      assert.ok(!Object.keys(r.headers).some((h) => h.startsWith('access-control-')), p);
+    }
+    const st = await request(c, 'GET', '/status', { headers: web });
+    assert.equal(st.status, 403);
+    assert.ok(!Object.keys(st.headers).some((h) => h.startsWith('access-control-')));
+    assert.equal((await request(c, 'POST', '/mcp', { headers: web, body: { jsonrpc: '2.0', id: 1, method: 'ping' } })).status, 403);
+  });
+
+  test('a web page guessing the token is blocked after 10 tries; the extension is not', async () => {
+    const page = { origin: 'https://guesser.example' };
+    for (let i = 0; i < 10; i++) assert.equal((await request(c, 'GET', '/llm/up/models', { auth: `guess-${i}`, headers: page })).status, 401, `try ${i + 1}`);
+    const blocked = await request(c, 'GET', '/llm/up/models', { headers: page });
+    assert.equal(blocked.status, 429, 'even the right token is refused while blocked');
+    assert.equal(blocked.headers['access-control-allow-origin'], '*');
+    assert.equal((await request(c, 'GET', '/llm/up/models', { headers: { origin: 'https://other.example' } })).status, 418);
+    assert.equal((await request(c, 'GET', '/llm/up/models', { headers: { origin: 'chrome-extension://abc' } })).status, 418);
+    assert.equal((await request(c, 'GET', '/llm/up/models')).status, 418);
+  });
 });
 
 describe('remote requests (through the tunnel)', () => {
@@ -1754,6 +1844,25 @@ describe('remote requests (through the tunnel)', () => {
     assert.equal((await request(c, 'GET', '/config')).status, 200);
   });
 
+  // Seen in a real set-up: the link opened in a browser, and an app given the bare link as its base URL.
+  test('the bare tunnel link (a browser, or an app with it as base URL) gets a pointer to /llm/<name>, not a bare refusal', async () => {
+    const root = await remote('GET', '/', { auth: false });
+    assert.equal(root.status, 404);
+    assert.match(root.json.error, /^This is the tunnel link of an Agent Automation companion, not a web page\./);
+    assert.match(root.json.error, /Add from connection code/);
+    assert.match(root.json.error, /\/llm\/<name> as the base URL/);
+    for (const [m, p] of [['GET', '/v1/models'], ['GET', '/models'], ['POST', '/v1/chat/completions'], ['POST', '/chat/completions'], ['GET', '/v1'], ['GET', '/api/tags']]) {
+      const r = await remote(m, p, { body: m === 'POST' ? { model: 'm' } : undefined });
+      assert.equal(r.status, 404, `${m} ${p}`);
+      assert.match(r.json.error, new RegExp(`^Not found: ${p.replace(/\//g, '\\/')}\\. The model API is under /llm/<name>`), p);
+      assert.doesNotMatch(r.text, new RegExp(c.token));
+    }
+    // Everything else stays a plain refusal, and nothing reached the model server.
+    assert.equal((await remote('GET', '/favicon.ico', { auth: false })).status, 403);
+    assert.equal((await remote('GET', '/v1beta/models')).status, 403);
+    assert.equal((await request(c, 'GET', '/v1/models')).status, 404, 'local: an unknown path, as before');
+  });
+
   test('the remote /status is reduced: no home folder, user, tools or config', async () => {
     const r = await remote('GET', '/status');
     assert.equal(r.status, 200);
@@ -1784,6 +1893,31 @@ describe('remote requests (through the tunnel)', () => {
     for (let i = 0; i < 12; i++) await request(c, 'GET', '/status', { auth: 'wrong' });
     assert.equal((await request(c, 'GET', '/status')).status, 200, 'local requests are never blocked');
     assert.match(fs.readFileSync(path.join(c.state, 'companion.log'), 'utf8'), /Blocked 198\.51\.100\.77/);
+  });
+
+  test('model proxy through the tunnel: any app with the token, CORS, exposeLlm and rate limiting still apply', async () => {
+    const app = { origin: 'https://chat.example.app', 'cf-connecting-ip': '198.51.100.90' };
+    const ok = await remote('POST', '/llm/up/v1/chat/completions', { headers: app, body: { model: 'm' } });
+    assert.equal(ok.status, 418);
+    assert.equal(JSON.parse(ok.text).url, '/v1/chat/completions');
+    assert.equal(ok.headers['access-control-allow-origin'], '*');
+    const pre = await remote('OPTIONS', '/llm/up/chat/completions', { auth: false, headers: { ...app, 'access-control-request-method': 'POST' } });
+    assert.equal(pre.status, 204);
+    // Web origins still cannot reach anything else through the tunnel.
+    assert.equal((await remote('GET', '/status', { headers: app })).status, 403);
+    await request(c, 'PUT', '/config', { body: { tunnel: { exposeLlm: false } } });
+    try {
+      const off = await remote('OPTIONS', '/llm/up/chat/completions', { auth: false, headers: { ...app, 'access-control-request-method': 'POST' } });
+      assert.equal(off.status, 403);
+      assert.equal(off.headers['access-control-allow-origin'], '*');
+      assert.equal((await remote('GET', '/llm/up/models', { headers: app })).status, 403);
+    } finally {
+      await request(c, 'PUT', '/config', { body: { tunnel: { exposeLlm: true } } });
+    }
+    for (let i = 0; i < 10; i++) assert.equal((await remote('GET', '/llm/up/models', { auth: 'wrong', headers: app })).status, 401);
+    const blocked = await remote('GET', '/llm/up/models', { headers: app });
+    assert.equal(blocked.status, 429);
+    assert.equal(blocked.headers['access-control-allow-origin'], '*');
   });
 });
 
@@ -1864,7 +1998,9 @@ describe('desktop tools', { skip: IS_WIN && 'POSIX only' }, () => {
     try {
       const d = (await status(c)).desktop;
       assert.deepEqual(d.available.sort(), ['close_window', 'desktop_screenshot', 'focus_window', 'launch_app', 'list_apps', 'list_windows', 'send_keys', 'type_in_app']);
-      assert.deepEqual(d.missing, {});
+      assert.deepEqual(Object.keys(d.missing).sort(), ['app_open_file', 'app_read_text', 'app_write_text']);
+      assert.match(d.missing.app_read_text, /Install xclip or xsel/);
+      assert.match(d.missing.app_open_file, /xdg-utils/);
       const { tools } = await rpc(c, 'tools/list', {});
       const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
       for (const n of ['list_apps', 'list_windows', 'desktop_screenshot']) assert.equal(byName[n].annotations.readOnlyHint, true, n);
@@ -1973,7 +2109,9 @@ describe('desktop tools', { skip: IS_WIN && 'POSIX only' }, () => {
     const c = await startCompanion({ env: { AGENT_COMPANION_DESKTOP_PLATFORM: 'darwin', FAKE_PNG: png, ...h.env } });
     try {
       const d = (await status(c)).desktop;
-      assert.deepEqual([d.platform, d.session, d.available.length], ['darwin', null, 8]);
+      assert.deepEqual([d.platform, d.session, d.available.length], ['darwin', null, 10]);
+      assert.ok(d.available.includes('run_applescript') && d.available.includes('app_open_file'));
+      assert.match(d.missing.app_read_text, /pbcopy or pbpaste/);
       const w = await call(c, 'list_windows');
       assert.match(w.text, /Safari\/1 {2}Safari — Apple — Start Page {2}\(front\)/);
       assert.match(w.text, /Music {2}Music \(no windows\)/);
@@ -2032,8 +2170,9 @@ describe('desktop tools', { skip: IS_WIN && 'POSIX only' }, () => {
     try {
       const d = (await status(win)).desktop;
       assert.deepEqual(d.available, []);
-      assert.equal(Object.keys(d.missing).length, 8);
-      assert.match(d.missing.list_apps, /Linux and macOS only/);
+      assert.equal(Object.keys(d.missing).length, 12);
+      assert.match(d.missing.list_apps, /PowerShell \(powershell\.exe\) was not found/);
+      assert.match(d.notes[0], /not been tested on Windows/);
       assert.ok(!(await rpc(win, 'tools/list', {})).tools.some((t) => t.name === 'list_apps'));
     } finally {
       await win.stop();
@@ -2053,6 +2192,628 @@ describe('desktop tools', { skip: IS_WIN && 'POSIX only' }, () => {
       const w = await call(c, 'list_windows');
       if (w.isError) assert.match(w.text, /Automation|Accessibility/, w.text);
       console.log(`    real desktop: ${apps.text.split('\n')[0]} | ${shot.text} | ${w.text.split('\n')[0]}`);
+    } finally {
+      await c.stop();
+    }
+  });
+});
+
+// ------------------------------------------------------------------ terminal sessions (real shells on a pty)
+
+// Real shells only: hidden processes with their folder inside the temp dir, running harmless commands.
+const termOut = (r) => r.text.split('\n').slice(1).join('\n'); // the output, without the status line
+const termMeta = (r) => r.structuredContent || {};
+function usablePython() {
+  const r = spawnSync('/bin/sh', ['-c', 'command -v python3'], { encoding: 'utf8' });
+  const py = r.stdout.trim();
+  if (!py) return null;
+  // macOS: /usr/bin/python3 without the developer tools would open an install dialog.
+  if (IS_MAC && py === '/usr/bin/python3' && !fs.existsSync('/Library/Developer/CommandLineTools') && !fs.existsSync('/Applications/Xcode.app')) return null;
+  return py;
+}
+const PYTHON = IS_WIN ? null : usablePython();
+const timed = async (fn) => {
+  const t0 = Date.now();
+  const r = await fn();
+  return { r, ms: Date.now() - t0 };
+};
+
+describe('terminal sessions', { skip: IS_WIN && 'POSIX only' }, () => {
+  let c;
+  let work;
+  before(async () => {
+    c = await startCompanion();
+    work = tmpDir('termwork');
+  });
+  after(() => c?.stop());
+
+  test('open → send → read → close round trip (zsh on a real pty)', async () => {
+    const o = await call(c, 'terminal_open', { shell: '/bin/zsh', cwd: work, name: 'roundtrip' });
+    assert.ok(!o.isError, o.text);
+    assert.match(o.text, /^\[terminal t\d+ "roundtrip"\] Opened \/bin\/zsh \(login shell\) on a real terminal \(pty\)/);
+    const { id, pid, pty } = termMeta(o);
+    assert.equal(pty, true);
+    assert.ok(pid > 0 && isAlive(pid));
+    const s = await call(c, 'terminal_send', { id, input: 'echo hello-terminal' });
+    assert.ok(!s.isError, s.text);
+    assert.match(s.text.split('\n')[0], /The command finished \(exit code 0\)/);
+    assert.equal(termOut(s).split('\n')[0], 'hello-terminal');
+    assert.ok(!termOut(s).includes('echo hello-terminal'), 'the echoed input is removed');
+    assert.equal(termMeta(s).still_running, false);
+    // Nothing new: an immediate read says so. The name works instead of the id.
+    assert.match((await call(c, 'terminal_read', { id: 'roundtrip' })).text, /\(no new output\)$/);
+    const closed = await call(c, 'terminal_close', { id });
+    assert.match(closed.text, new RegExp(`Closed terminal ${id} "roundtrip"`));
+    await waitUntil(() => !isAlive(pid), 5000, `the shell (pid ${pid}) to exit`);
+    const gone = await call(c, 'terminal_send', { id, input: 'echo x' });
+    assert.equal(gone.isError, true);
+    assert.match(gone.text, /There is no terminal session/);
+  });
+
+  test('the folder and environment persist between calls (bash); exit codes are reported', async () => {
+    const o = await call(c, 'terminal_open', { shell: '/bin/bash', cwd: work });
+    const { id } = termMeta(o);
+    try {
+      assert.match((await call(c, 'terminal_send', { id, input: 'mkdir -p persist/inner && cd persist/inner' })).text, /exit code 0/);
+      const pwd = await call(c, 'terminal_send', { id, input: 'pwd -P' });
+      assert.equal(termOut(pwd).split('\n')[0], path.join(fs.realpathSync(work), 'persist', 'inner'));
+      assert.equal(fs.realpathSync(termMeta(pwd).cwd), path.join(fs.realpathSync(work), 'persist', 'inner'));
+      await call(c, 'terminal_send', { id, input: 'export AA_TEST_VAR=forty-two' });
+      assert.equal(termOut(await call(c, 'terminal_send', { id, input: 'echo "v=$AA_TEST_VAR"' })).split('\n')[0], 'v=forty-two');
+      const f = await call(c, 'terminal_send', { id, input: 'false' });
+      assert.match(f.text, /The command finished \(exit code 1\)/);
+      assert.equal(termMeta(f).exit_code, 1);
+      // Comments and "!" are taken literally (no history expansion).
+      assert.equal(termOut(await call(c, 'terminal_send', { id, input: 'echo "wow!" # a comment' })).split('\n')[0], 'wow!');
+    } finally {
+      await call(c, 'terminal_close', { id });
+    }
+  });
+
+  test('interactive programs: wait_for a prompt (python3 -i), stdin of cat, Ctrl-D', async () => {
+    const o = await call(c, 'terminal_open', { cwd: work });
+    const { id } = termMeta(o);
+    try {
+      if (PYTHON) {
+        const py = await call(c, 'terminal_send', { id, input: 'python3 -i -q', wait_for: '>>> ' });
+        assert.equal(termMeta(py).matched, true, py.text);
+        assert.equal(termMeta(py).still_running, true);
+        assert.match(py.text, /Found ">>> "\. Still running/);
+        const r = await call(c, 'terminal_send', { id, input: '6*7', wait_for: '>>> ' });
+        assert.equal(termOut(r), '42\n>>> ');
+        const quit = await call(c, 'terminal_send', { id, input: 'exit()' });
+        assert.equal(termMeta(quit).still_running, false, quit.text);
+      }
+      const cat = await call(c, 'terminal_send', { id, input: 'cat', quiet_ms: 300 });
+      assert.equal(termMeta(cat).still_running, true, cat.text);
+      assert.equal(termMeta(cat).foreground, 'cat');
+      const line = await call(c, 'terminal_send', { id, input: 'echo me back', wait_for: 'echo me back' });
+      assert.equal(termOut(line), 'echo me back\n', 'cat repeats the line once; the terminal echo is removed');
+      const eof = await call(c, 'terminal_send', { id, input: '\u0004', press_enter: false });
+      assert.equal(termMeta(eof).still_running, false, eof.text);
+    } finally {
+      await call(c, 'terminal_close', { id });
+    }
+  });
+
+  test('terminal_interrupt stops a running command and the shell stays usable', async () => {
+    const o = await call(c, 'terminal_open', { shell: '/bin/zsh', cwd: work });
+    const { id, pid } = termMeta(o);
+    try {
+      const s = await call(c, 'terminal_send', { id, input: 'sleep 61.37' });
+      assert.equal(termMeta(s).still_running, true, s.text);
+      assert.equal(termMeta(s).foreground, 'sleep');
+      assert.match(s.text, /Still running: sleep; no new output for 0\.8 s/);
+      assert.equal(spawnSync('pgrep', ['-f', 'sleep 61.37']).status, 0, 'sleep is running');
+      const list = await call(c, 'terminal_list');
+      assert.match(list.text, new RegExp(`${id}  zsh  pid ${pid}  running: sleep`));
+      const i = await call(c, 'terminal_interrupt', { id });
+      assert.equal(termMeta(i).still_running, false, i.text);
+      assert.equal(termMeta(i).exit_code, 130);
+      await waitUntil(() => spawnSync('pgrep', ['-f', 'sleep 61.37']).status !== 0, 5000, 'sleep to stop');
+      assert.equal(termOut(await call(c, 'terminal_send', { id, input: 'echo after-interrupt' })).split('\n')[0], 'after-interrupt');
+      // A program that ignores Ctrl-C gets SIGINT, then SIGTERM.
+      await call(c, 'terminal_send', { id, input: `/bin/bash -c "trap '' INT; sleep 62.41"`, quiet_ms: 300 });
+      const { r: stubborn, ms } = await timed(() => call(c, 'terminal_interrupt', { id }));
+      assert.equal(termMeta(stubborn).still_running, false, stubborn.text);
+      assert.ok(ms >= 3000 && ms < 9000, String(ms));
+      assert.equal(spawnSync('pgrep', ['-f', 'sleep 62.41']).status, 1);
+    } finally {
+      await call(c, 'terminal_close', { id });
+    }
+  });
+
+  test('quiet_ms, wait_for and the timeout: what comes back, and still_running', async () => {
+    const o = await call(c, 'terminal_open', { shell: '/bin/bash', cwd: work });
+    const { id } = termMeta(o);
+    try {
+      // Quiet: returns early while the command is still running; terminal_read with timeout_sec waits for the end.
+      const q = await timed(() => call(c, 'terminal_send', { id, input: 'sleep 1.5; echo SLEPT-WELL', quiet_ms: 300 }));
+      assert.ok(q.ms < 1200, String(q.ms));
+      assert.equal(termMeta(q.r).reason, 'quiet');
+      assert.equal(termMeta(q.r).still_running, true);
+      assert.ok(!q.r.text.includes('SLEPT-WELL'));
+      const rd = await call(c, 'terminal_read', { id, timeout_sec: 10 });
+      assert.match(termOut(rd), /^SLEPT-WELL\n/);
+      assert.equal(termMeta(rd).still_running, false);
+      // wait_for: waits through pauses longer than quiet_ms until the text appears (case-insensitive).
+      const w = await timed(() => call(c, 'terminal_send', { id, input: 'for i in 1 2 3; do echo n$i; sleep 0.4; done; echo DONE-MARK', wait_for: 'done-mark', quiet_ms: 100 }));
+      assert.equal(termMeta(w.r).matched, true, w.r.text);
+      assert.ok(w.ms >= 1000, String(w.ms));
+      assert.match(termOut(w.r), /^n1\nn2\nn3\nDONE-MARK\n/);
+      // A regular expression.
+      const re = await call(c, 'terminal_send', { id, input: "printf 'code abc123\\n'", wait_for: '/c\\d{3}$/m' });
+      assert.equal(termMeta(re).matched, true, re.text);
+      // The command finished without printing it: no need to wait for the timeout.
+      const miss = await timed(() => call(c, 'terminal_send', { id, input: 'echo nothing-here', wait_for: 'zzz-never', timeout_sec: 20 }));
+      assert.ok(miss.ms < 3000, String(miss.ms));
+      assert.equal(termMeta(miss.r).matched, false);
+      assert.match(miss.r.text, /"zzz-never" did not appear\. The command finished/);
+      // Output that never stops: the timeout ends the wait, the command keeps running.
+      const t = await timed(() => call(c, 'terminal_send', { id, input: 'while :; do echo tick; sleep 0.1; done', timeout_sec: 2 }));
+      assert.ok(t.ms >= 1900 && t.ms < 5000, String(t.ms));
+      assert.equal(termMeta(t.r).reason, 'timeout');
+      assert.equal(termMeta(t.r).still_running, true);
+      assert.match(t.r.text, /Still running(: sleep)? after 2 s/);
+      assert.match(termOut(t.r), /tick\ntick/);
+      assert.equal(termMeta(await call(c, 'terminal_interrupt', { id })).still_running, false);
+      const bad = await call(c, 'terminal_send', { id, input: 'x', wait_for: '/(/' });
+      assert.equal(bad.isError, true);
+      assert.match(bad.text, /not a valid regular expression/);
+    } finally {
+      await call(c, 'terminal_close', { id });
+    }
+  });
+
+  test('escape codes, carriage-return redraws and missing newlines are cleaned up', async () => {
+    const o = await call(c, 'terminal_open', { shell: '/bin/zsh', cwd: work });
+    const { id } = termMeta(o);
+    try {
+      const red = await call(c, 'terminal_send', { id, input: "printf '\\e[31mred\\e[0m\\n'" });
+      assert.equal(termOut(red).split('\n')[0], 'red');
+      assert.ok(!red.text.includes('\x1b') && !red.text.includes('printf'), JSON.stringify(red.text));
+      const bar = await call(c, 'terminal_send', { id, input: "printf 'progress 10%%\\rprogress 100%%\\n'; printf 'abcdef\\b\\b\\bXY\\n'; printf 'gone\\r\\e[Kkept\\n'" });
+      assert.deepEqual(termOut(bar).split('\n').slice(0, 3), ['progress 100%', 'abcXYf', 'kept']);
+      const nonl = await call(c, 'terminal_send', { id, input: "printf 'no-newline-at-end'" });
+      const lines = termOut(nonl).split('\n');
+      assert.equal(lines[0], 'no-newline-at-end');
+      assert.ok(lines.length >= 2 && lines.at(-1).endsWith('% '), 'the prompt starts on a line of its own');
+    } finally {
+      await call(c, 'terminal_close', { id });
+    }
+  });
+
+  test('long output: capped per call (head and tail), and the scrollback keeps the last 256 KB', async () => {
+    const o = await call(c, 'terminal_open', { shell: '/bin/bash', cwd: work });
+    const { id } = termMeta(o);
+    try {
+      const r = await call(c, 'terminal_send', { id, input: 'seq 1 150000', timeout_sec: 60 });
+      const out = termOut(r);
+      assert.ok(out.length < 61000, String(out.length));
+      assert.match(out, /\[… \d+ chars omitted …\]/);
+      assert.match(out, /\n149999\n150000\n/);
+      assert.ok(termMeta(r).dropped_chars > 0 && termMeta(r).omitted_chars > 0, JSON.stringify(termMeta(r)));
+      assert.match(r.text.split('\n')[0], /characters were dropped: a session keeps the last 256 KB between reads/);
+    } finally {
+      await call(c, 'terminal_close', { id });
+    }
+  });
+
+  test('a client that disconnects during a wait only stops the wait: the session and its output stay', async () => {
+    const o = await call(c, 'terminal_open', { shell: '/bin/bash', cwd: work });
+    const { id, pid } = termMeta(o);
+    try {
+      let req;
+      const pending = request(c, 'POST', '/mcp', {
+        body: { jsonrpc: '2.0', id: 4242, method: 'tools/call', params: { name: 'terminal_send', arguments: { id, input: 'sleep 1; echo LATE-OUTPUT', wait_for: 'never-appears-xyz', timeout_sec: 60 } } },
+        onRequest: (r) => (req = r),
+      }).catch(() => 'aborted');
+      await sleep(400);
+      req.destroy();
+      assert.equal(await pending, 'aborted');
+      assert.ok(isAlive(pid));
+      assert.match((await call(c, 'terminal_list')).text, new RegExp(`^${id} `, 'm'));
+      const rd = await call(c, 'terminal_read', { id, timeout_sec: 10 });
+      assert.match(termOut(rd), /^LATE-OUTPUT$/m);
+      assert.equal(termOut(await call(c, 'terminal_send', { id, input: 'echo still-here' })).split('\n')[0], 'still-here');
+    } finally {
+      await call(c, 'terminal_close', { id });
+    }
+  });
+
+  test('an answer to a password prompt is not written to the log; the shell can be exited', async () => {
+    const o = await call(c, 'terminal_open', { shell: '/bin/bash', cwd: work });
+    const { id, pid } = termMeta(o);
+    const p = await call(c, 'terminal_send', { id, input: "read -s -p 'Password: ' pw; echo; echo len=${#pw}", wait_for: 'password:' });
+    assert.equal(termMeta(p).matched, true, p.text);
+    const a = await call(c, 'terminal_send', { id, input: 'hunter2-secret' });
+    assert.match(termOut(a), /len=14/);
+    assert.ok(!termOut(a).includes('hunter2-secret'));
+    await waitUntil(() => /hidden: the answer to a password prompt/.test(c.out()), 3000, 'the log line');
+    assert.ok(!c.out().includes('hunter2-secret'));
+    assert.ok(!fs.readFileSync(path.join(c.state, 'companion.log'), 'utf8').includes('hunter2-secret'));
+    const x = await call(c, 'terminal_send', { id, input: 'exit 3' });
+    assert.match(x.text, /The shell has ended \(exit code 3\); the session is closed\./);
+    assert.equal(termMeta(x).exit_code, 3);
+    await waitUntil(() => !isAlive(pid), 5000, 'the shell to exit');
+    assert.match((await call(c, 'terminal_list')).text, /No terminal sessions are open/);
+  });
+
+  test('/status lists the sessions; unknown ids and bad arguments are readable errors', async () => {
+    const o = await call(c, 'terminal_open', { cwd: work, name: 'statusy' });
+    const { id, pid } = termMeta(o);
+    try {
+      const s = await status(c);
+      assert.equal(s.config.terminalIdleMinutes, 30);
+      const t = s.terminals.find((x) => x.id === id);
+      assert.deepEqual({ ...t, idle: typeof t.idle }, { id, name: 'statusy', pid, idle: 'number', shell: path.basename(process.env.SHELL || 'zsh'), pty: true });
+      const dup = await call(c, 'terminal_open', { cwd: work, name: 'statusy' });
+      assert.equal(dup.isError, true);
+      assert.match(dup.text, /already open/);
+      const unknown = await call(c, 'terminal_send', { id: 't999', input: 'x' });
+      assert.equal(unknown.isError, true);
+      assert.match(unknown.text, new RegExp(`no terminal session "t999"\\. Open sessions: .*${id} "statusy"`));
+      assert.match((await call(c, 'terminal_send', { id })).text, /"input" is required/);
+      assert.match((await call(c, 'terminal_open', { cwd: '~/no/such/folder' })).text, /does not exist/);
+      assert.match((await call(c, 'terminal_open', { shell: 'no-such-shell-xyz' })).text, /Not found: "no-such-shell-xyz"/);
+    } finally {
+      await call(c, 'terminal_close', { id });
+    }
+  });
+
+  test('the tool descriptions teach the workflow; read and list are read-only', async () => {
+    const { tools } = await rpc(c, 'tools/list', {});
+    const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
+    for (const n of ['terminal_open', 'terminal_send', 'terminal_read', 'terminal_interrupt', 'terminal_close', 'terminal_list']) assert.ok(byName[n], n);
+    assert.match(byName.terminal_open.description, /open once, then terminal_send/);
+    assert.match(byName.terminal_open.description, /run_command is simpler/);
+    assert.match(byName.terminal_send.description, /wait_for/);
+    assert.match(byName.terminal_send.description, /terminal_interrupt/);
+    for (const n of ['terminal_read', 'terminal_list']) assert.equal(byName[n].annotations.readOnlyHint, true, n);
+    for (const n of ['terminal_open', 'terminal_send', 'terminal_interrupt', 'terminal_close']) assert.equal(byName[n].annotations.readOnlyHint, false, n);
+    assert.deepEqual(byName.terminal_send.inputSchema.required, ['id', 'input']);
+  });
+});
+
+describe('terminal sessions: limits, idle timeout, shutdown, fallbacks', { skip: IS_WIN && 'POSIX only' }, () => {
+  test('at most 8 sessions; POST /terminals/close-all closes them all', async () => {
+    const c = await startCompanion();
+    try {
+      const pids = [];
+      for (let i = 0; i < 8; i++) {
+        const o = await call(c, 'terminal_open', { shell: '/bin/bash', cwd: c.home });
+        assert.ok(!o.isError, o.text);
+        pids.push(termMeta(o).pid);
+      }
+      const ninth = await call(c, 'terminal_open', { shell: '/bin/bash' });
+      assert.equal(ninth.isError, true);
+      assert.match(ninth.text, /already 8 terminal sessions open \(t1, t2, .*t8\)\. Reuse one of them, or close one with terminal_close/);
+      assert.equal((await status(c)).terminals.length, 8);
+      assert.equal((await request(c, 'GET', '/terminals/close-all')).status, 405);
+      const r = await request(c, 'POST', '/terminals/close-all', { body: {} });
+      assert.equal(r.status, 200, r.text);
+      assert.deepEqual(r.json, { closed: 8, terminals: [] });
+      for (const pid of pids) await waitUntil(() => !isAlive(pid), 5000, `shell ${pid} to exit`);
+      assert.match((await call(c, 'terminal_list')).text, /No terminal sessions are open/);
+      // Not through the tunnel.
+      const remote = await request(c, 'POST', '/terminals/close-all', { body: {}, headers: REMOTE });
+      assert.equal(remote.status, 403);
+    } finally {
+      await c.stop();
+    }
+  });
+
+  test('idle sessions are closed after terminalIdleMinutes; PUT /config validates it', async () => {
+    const c = await startCompanion({ config: { terminalIdleMinutes: 0.05 } });
+    try {
+      const o = await call(c, 'terminal_open', { shell: '/bin/bash', cwd: c.home });
+      const { id, pid } = termMeta(o);
+      assert.match((await call(c, 'terminal_list')).text, new RegExp(`^${id} `, 'm'));
+      await waitUntil(async () => /No terminal sessions are open/.test((await call(c, 'terminal_list')).text), 10000, 'the idle session to close');
+      await waitUntil(() => !isAlive(pid), 5000, 'the shell to exit');
+      assert.match(c.out(), new RegExp(`Terminal ${id} closed \\(not used for 0\\.05 minutes\\)`));
+      for (const bad of ['5', -1, 0.01, 5000, true]) {
+        const r = await request(c, 'PUT', '/config', { body: { terminalIdleMinutes: bad } });
+        assert.equal(r.status, 400, JSON.stringify(bad));
+        assert.match(r.json.error, /terminalIdleMinutes/);
+      }
+      const ok = await request(c, 'PUT', '/config', { body: { terminalIdleMinutes: 0 } });
+      assert.equal(ok.status, 200);
+      assert.equal(ok.json.config.terminalIdleMinutes, 0);
+      assert.equal(JSON.parse(fs.readFileSync(path.join(c.state, 'companion.json'), 'utf8')).terminalIdleMinutes, 0);
+      assert.equal((await request(c, 'GET', '/config')).json.terminalIdleMinutes, 0);
+    } finally {
+      await c.stop();
+    }
+  });
+
+  test('stopping the companion ends every session and the jobs started in it', async () => {
+    const c = await startCompanion();
+    const a = termMeta(await call(c, 'terminal_open', { shell: '/bin/bash', cwd: c.home }));
+    const b = termMeta(await call(c, 'terminal_open', { shell: '/bin/zsh', cwd: c.home }));
+    const bg = await call(c, 'terminal_send', { id: a.id, input: 'sleep 300 & echo BG=$!' });
+    const bgPid = Number(/BG=(\d+)/.exec(bg.text)?.[1]);
+    assert.ok(bgPid > 0, bg.text);
+    await call(c, 'terminal_send', { id: b.id, input: 'sleep 301', quiet_ms: 200 });
+    assert.ok(isAlive(a.pid) && isAlive(b.pid) && isAlive(bgPid));
+    await c.stop();
+    assert.ok(c.child.exitCode !== null || c.child.signalCode !== null);
+    for (const pid of [a.pid, b.pid, bgPid]) await waitUntil(() => !isAlive(pid), 5000, `pid ${pid} to exit`);
+    assert.match(fs.readFileSync(path.join(c.state, 'companion.log'), 'utf8'), /Terminal t1 closed \(the companion is stopping\)/);
+  });
+
+  test('fallbacks: Python\'s pty module, then plain pipes (no terminal) with a note', async () => {
+    const work = tmpDir('fallback');
+    for (const mode of [...(PYTHON ? ['python'] : []), 'pipes']) {
+      const c = await startCompanion({ env: { AGENT_COMPANION_TERMINAL_MODES: mode } });
+      try {
+        const o = await call(c, 'terminal_open', { shell: '/bin/bash', cwd: work });
+        assert.ok(!o.isError, o.text);
+        const { id, pty } = termMeta(o);
+        assert.equal(pty, mode !== 'pipes', mode);
+        if (mode === 'pipes') assert.match(o.text, /on plain pipes \(no terminal\)[\s\S]*Note: No terminal \(pty\) could be created/);
+        else assert.match(o.text, /on a real terminal \(pty\)/);
+        await call(c, 'terminal_send', { id, input: 'cd / && export FB=yes' });
+        assert.equal(termOut(await call(c, 'terminal_send', { id, input: 'echo "$FB $(pwd)"' })).split('\n')[0], 'yes /', mode);
+        assert.equal(termMeta(await call(c, 'terminal_send', { id, input: 'sleep 30', quiet_ms: 300 })).still_running, true, mode);
+        const i = await call(c, 'terminal_interrupt', { id });
+        assert.equal(termMeta(i).still_running, false, `${mode}: ${i.text}`);
+        assert.equal(termOut(await call(c, 'terminal_send', { id, input: 'echo ok' })).split('\n')[0], 'ok', mode);
+      } finally {
+        await c.stop();
+      }
+    }
+    const none = await startCompanion({ env: { AGENT_COMPANION_TERMINAL_MODES: 'nothing-works' } });
+    try {
+      const o = await call(none, 'terminal_open', {});
+      assert.equal(o.isError, true);
+      assert.match(o.text, /Could not start a terminal session/);
+      assert.deepEqual((await status(none)).terminals, []);
+    } finally {
+      await none.stop();
+    }
+  });
+
+  test('allowShell=false hides and refuses the terminal tools', async () => {
+    const c = await startCompanion({ config: { allowShell: false } });
+    try {
+      const names = (await rpc(c, 'tools/list', {})).tools.map((t) => t.name);
+      assert.ok(!names.some((n) => n.startsWith('terminal_')), names.join(','));
+      const r = await call(c, 'terminal_open', {});
+      assert.equal(r.isError, true);
+      assert.match(r.text, /allowShell/);
+      assert.ok(!(await status(c)).tools.some((t) => t.name.startsWith('terminal_')));
+    } finally {
+      await c.stop();
+    }
+  });
+});
+
+// ------------------------------------------------------------------ applications (AppleScript, PowerShell, clipboard pair)
+
+describe('application tools', { skip: IS_WIN && 'POSIX only' }, () => {
+  const png = path.join(ROOT, 'app-shot.png');
+  before(() => fs.writeFileSync(png, makePng(40, 20, () => [0, 128, 0])));
+  const editor = (doc, clip, extra = {}) => {
+    const f = path.join(tmpDir('editor'), 'state.json');
+    fs.writeFileSync(f, JSON.stringify({ doc, clip, cursor: 0, sel: null, events: [], ...extra }));
+    return { file: f, get: () => JSON.parse(fs.readFileSync(f, 'utf8')) };
+  };
+  const psCall = (x) => {
+    const i = x.args.findIndex((a) => /^-EncodedCommand$/i.test(a));
+    const script = i >= 0 ? Buffer.from(x.args[i + 1], 'base64').toString('utf16le') : '';
+    let data = null;
+    try {
+      data = JSON.parse(Buffer.from((x.stdin || '').trim(), 'base64').toString('utf8'));
+    } catch {}
+    return { tag: /#aa:([\w-]+)/.exec(script)?.[1], script, data, stdin: x.stdin };
+  };
+
+  test('run_applescript: real osascript for plain arithmetic (no permission needed)', { skip: !IS_MAC && 'macOS only' }, async () => {
+    const c = await startCompanion({ env: { AGENT_COMPANION_DESKTOP_PATH: '/usr/bin' } });
+    try {
+      const r = await call(c, 'run_applescript', { script: 'return 1 + 1' });
+      assert.ok(!r.isError, r.text);
+      assert.equal(r.text, 'Result: 2');
+    } finally {
+      await c.stop();
+    }
+  });
+
+  test('run_applescript through a stand-in osascript: script on stdin, language, errors with the way out, allowShell', async () => {
+    const h = fakeHelpers(['osascript', 'open']);
+    const c = await startCompanion({ env: { AGENT_COMPANION_DESKTOP_PLATFORM: 'darwin', ...h.env } });
+    try {
+      const { tools } = await rpc(c, 'tools/list', {});
+      const tool = tools.find((t) => t.name === 'run_applescript');
+      assert.match(tool.description, /tell application "TextEdit" to get text of front document/);
+      assert.match(tool.description, /Microsoft Excel.*get value of range "A1:C5" of active sheet/);
+      assert.match(tool.description, /Numbers.*value of cell "B2" of table 1 of sheet 1/);
+      assert.match(tool.description, /Automation permission/);
+      assert.ok(!tools.some((t) => t.name === 'run_powershell'));
+      h.answer('osascript', { out: 'hello from TextEdit\n' });
+      const r = await call(c, 'run_applescript', { script: 'tell application "TextEdit" to get text of front document' });
+      assert.equal(r.text, 'Result: hello from TextEdit');
+      assert.deepEqual(h.calls('osascript').at(-1), { name: 'osascript', args: ['-l', 'AppleScript'], stdin: 'tell application "TextEdit" to get text of front document' });
+      await call(c, 'run_applescript', { script: 'Application("TextEdit").documents[0].text()', language: 'JavaScript' });
+      assert.deepEqual(h.calls('osascript').at(-1).args, ['-l', 'JavaScript']);
+      h.answer('osascript', { err: '15:40: execution error: Not authorized to send Apple events to TextEdit. (-1743)\n', code: 1 });
+      const denied = await call(c, 'run_applescript', { script: 'tell application "TextEdit" to get text of front document' });
+      assert.equal(denied.isError, true);
+      assert.match(denied.text, /^AppleScript error: .*-1743[\s\S]*Privacy & Security → Automation/);
+      const lang = await call(c, 'run_applescript', { script: 'x', language: 'Python' });
+      assert.match(lang.text, /"language" must be/);
+      const win = await call(c, 'run_powershell', { script: '1' });
+      assert.equal(win.isError, true);
+      assert.match(win.text, /only available on Windows/);
+      await request(c, 'PUT', '/config', { body: { allowShell: false } });
+      assert.ok(!(await rpc(c, 'tools/list', {})).tools.some((t) => t.name === 'run_applescript'));
+      assert.match((await status(c)).desktop.missing.run_applescript, /allowShell/);
+      assert.match((await call(c, 'run_applescript', { script: 'return 1' })).text, /allowShell is false/);
+      assert.ok((await rpc(c, 'tools/list', {})).tools.some((t) => t.name === 'app_open_file'), 'app_open_file does not need the shell');
+    } finally {
+      await c.stop();
+    }
+  });
+
+  test('macOS: app_read_text / app_write_text through stand-in keystrokes and clipboard; the clipboard is put back', async () => {
+    const h = fakeHelpers(['osascript', 'open', 'pbcopy', 'pbpaste']);
+    h.answer('osascript-list', { out: 'TextEdit\t1\tnotes.txt\ttrue\nFinder\t1\tDesktop\tfalse\n' });
+    const ed = editor('Hello from the document\nline 2 ✓', 'USER-CLIPBOARD');
+    const c = await startCompanion({ env: { AGENT_COMPANION_DESKTOP_PLATFORM: 'darwin', FAKE_EDITOR_STATE: ed.file, ...h.env } });
+    try {
+      const d = (await status(c)).desktop;
+      assert.ok(['app_read_text', 'app_write_text', 'app_open_file', 'run_applescript'].every((t) => d.available.includes(t)), JSON.stringify(d));
+      const r = await call(c, 'app_read_text', { window: 'notes.txt' });
+      assert.ok(!r.isError, r.text);
+      assert.match(r.text, /^Read 32 characters from TextEdit\/1 {2}TextEdit — notes\.txt/);
+      assert.ok(r.text.endsWith('\nHello from the document\nline 2 ✓'), r.text);
+      assert.deepEqual(ed.get().events, ['command+a', 'command+c', 'Right']);
+      assert.equal(ed.get().clip, 'USER-CLIPBOARD');
+      const names = h.calls().map((x) => x.name);
+      assert.deepEqual(names.slice(0, 5), ['pbpaste', 'pbcopy', 'osascript', 'osascript', 'osascript'], names.join(' '));
+      assert.deepEqual(names.slice(-2), ['osascript', 'pbcopy']);
+      assert.match(h.calls('pbcopy')[0].stdin, /^agent-companion-clipboard-check-[0-9a-f]+$/);
+      assert.equal(h.calls('pbcopy').at(-1).stdin, 'USER-CLIPBOARD');
+      // The keys go to the focused window: list, focus (AXRaise), then cmd+a cmd+c.
+      const focus = h.calls('osascript')[1];
+      assert.ok(focus.args.join('\n').includes('AXRaise'));
+      assert.deepEqual(focus.args.slice(focus.args.indexOf('--') + 1), ['TextEdit', '1']);
+
+      h.reset();
+      const w = await call(c, 'app_write_text', { window: 'TextEdit', text: 'New content ✓' });
+      assert.ok(!w.isError, w.text);
+      assert.match(w.text, /Replaced all the text in TextEdit\/1 .* by pasting 13 characters \(keys: cmd\+a cmd\+v/);
+      assert.equal(ed.get().doc, 'New content ✓');
+      assert.equal(ed.get().clip, 'USER-CLIPBOARD');
+      assert.equal(h.calls('pbcopy')[0].stdin, 'New content ✓');
+      await call(c, 'app_write_text', { window: 'notes', text: '\nappended', mode: 'append' });
+      assert.equal(ed.get().doc, 'New content ✓\nappended');
+      assert.deepEqual(ed.get().events.slice(-2), ['command+Down', 'command+v']);
+      await call(c, 'app_write_text', { text: '!', mode: 'insert' });
+      assert.equal(ed.get().doc, 'New content ✓\nappended!');
+      assert.equal(ed.get().clip, 'USER-CLIPBOARD');
+      assert.match((await call(c, 'app_write_text', { text: 'x', mode: 'prepend' })).text, /"mode" must be/);
+
+      // Copy that does nothing: a clear error, and the clipboard is still put back.
+      const st = ed.get();
+      fs.writeFileSync(ed.file, JSON.stringify({ ...st, noCopy: true }));
+      const none = await call(c, 'app_read_text', { window: 'notes.txt' });
+      assert.equal(none.isError, true);
+      assert.match(none.text, /Nothing was copied from TextEdit\/1[\s\S]*run_applescript/);
+      assert.equal(ed.get().clip, 'USER-CLIPBOARD');
+
+      // app_open_file: open -a, then the front window's title.
+      const file = path.join(tmpDir('docs'), 'notes.txt');
+      fs.writeFileSync(file, 'x');
+      h.reset();
+      h.answer('osascript-front_window', { out: 'TextEdit\tnotes.txt\n' });
+      const op = await call(c, 'app_open_file', { path: file, app: 'TextEdit' });
+      assert.ok(!op.isError, op.text);
+      assert.deepEqual(h.calls('open')[0].args, ['-a', 'TextEdit', file]);
+      assert.match(op.text, new RegExp(`Opened ${file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} in TextEdit\\. Window: TextEdit — notes\\.txt\\. Use "notes\\.txt" as "window"`));
+      const missing = await call(c, 'app_open_file', { path: '~/no/such.txt' });
+      assert.match(missing.text, /Not found/);
+    } finally {
+      await c.stop();
+    }
+  });
+
+  test('Linux X11: the clipboard pair with xdotool and xclip; app_open_file with xdg-open', async () => {
+    const h = fakeHelpers(['xdotool', 'wmctrl', 'xclip', 'xdg-open']);
+    h.answer('wmctrl', { out: '0x04000001  0 777   host notes.txt - gedit\n' });
+    const ed = editor('linux text', 'KEEP-ME');
+    const c = await startCompanion({ env: { AGENT_COMPANION_DESKTOP_PLATFORM: 'linux', XDG_SESSION_TYPE: 'x11', DISPLAY: ':99', WAYLAND_DISPLAY: '', FAKE_EDITOR_STATE: ed.file, ...h.env } });
+    try {
+      const d = (await status(c)).desktop;
+      assert.ok(['app_read_text', 'app_write_text', 'app_open_file'].every((t) => d.available.includes(t)), JSON.stringify(d));
+      assert.ok(!d.available.includes('run_applescript') && !('run_applescript' in d.missing));
+      const r = await call(c, 'app_read_text', { window: 'gedit' });
+      assert.ok(r.text.endsWith('\nlinux text'), r.text);
+      assert.deepEqual(ed.get().events, ['ctrl+a', 'ctrl+c', 'Right']);
+      assert.equal(ed.get().clip, 'KEEP-ME');
+      assert.deepEqual(h.calls('xclip')[0].args, ['-selection', 'clipboard', '-o']);
+      assert.deepEqual(h.calls('xdotool').map((x) => x.args), [['key', '--clearmodifiers', 'ctrl+a', 'ctrl+c'], ['key', '--clearmodifiers', 'Right']]);
+      await call(c, 'app_write_text', { window: 'gedit', text: ' more', mode: 'append' });
+      assert.equal(ed.get().doc, 'linux text more');
+      assert.deepEqual(ed.get().events.slice(-2), ['ctrl+End', 'ctrl+v']);
+      assert.equal(ed.get().clip, 'KEEP-ME');
+      const file = path.join(tmpDir('docs'), 'notes.txt');
+      fs.writeFileSync(file, 'x');
+      const op = await call(c, 'app_open_file', { path: file });
+      assert.deepEqual(h.calls('xdg-open')[0].args, [file]);
+      assert.match(op.text, /Window: 0x04000001 {2}notes\.txt - gedit {2}\(pid 777\)/);
+    } finally {
+      await c.stop();
+    }
+  });
+
+  test('Windows (untested there): every desktop tool goes through PowerShell with its data on stdin', async () => {
+    const h = fakeHelpers(['powershell']);
+    h.answer('powershell-list_windows', { out: '4242\tnotepad\tnotes.txt - Notepad\r\n5151\tEXCEL\tBook1 - Excel\r\n' });
+    h.answer('powershell-list_apps', { out: 'lnk\tNotepad\tC:\\ProgramData\\Start Menu\\Notepad.lnk\r\nexe\texcel\tC:\\Program Files\\Office\\EXCEL.EXE\r\n' });
+    h.answer('powershell-app_read_text', { out: `#text:${Buffer.from('hello windows ✓', 'utf8').toString('base64')}\r\n` });
+    h.answer('powershell-app_open_file', { out: '4242\tnotepad\tnotes.txt - Notepad\r\n' });
+    h.answer('powershell-run_powershell', { out: '2\r\n' });
+    const c = await startCompanion({ env: { AGENT_COMPANION_DESKTOP_PLATFORM: 'win32', FAKE_PNG: png, ...h.env } });
+    try {
+      const d = (await status(c)).desktop;
+      assert.equal(d.available.length, 12, JSON.stringify(d));
+      assert.match(d.notes[0], /not been tested on Windows/);
+      const names = (await rpc(c, 'tools/list', {})).tools.map((t) => t.name);
+      assert.ok(names.includes('run_powershell') && !names.includes('run_applescript'));
+      const ps = () => h.calls('powershell').map(psCall);
+
+      assert.match((await call(c, 'list_windows')).text, /4242 {2}notepad — notes\.txt - Notepad\n5151 {2}EXCEL — Book1 - Excel/);
+      h.reset();
+      await call(c, 'focus_window', { title_or_id: 'excel' });
+      assert.deepEqual(ps().map((x) => [x.tag, x.data]), [['list_windows', {}], ['focus_window', { pid: 5151 }]]);
+      assert.match(ps()[1].script, /AppActivate\(\[int\]\$d\.pid\)/);
+      h.reset();
+      await call(c, 'send_keys', { keys: 'ctrl+s alt+F4 Return ctrl+shift+t ctrl+%' });
+      assert.deepEqual(ps().map((x) => [x.tag, x.data]), [['send_keys', { keys: '^s%{F4}{ENTER}^+t^{%}' }]]);
+      assert.match((await call(c, 'send_keys', { keys: 'cmd+l' })).text, /Windows key/);
+      h.reset();
+      await call(c, 'type_in_app', { text: 'a+b (c) {d}\nnext~' });
+      assert.deepEqual(ps()[0].data, { keys: 'a{+}b {(}c{)} {{}d{}}{ENTER}next{~}' });
+      h.reset();
+      const shot = await call(c, 'desktop_screenshot');
+      assert.ok(!shot.isError, shot.text);
+      assert.ok(shot.content.some((x) => x.type === 'image'));
+      assert.equal(ps()[0].tag, 'desktop_screenshot');
+      assert.match(ps()[0].data.file, /screen\.png$/);
+      assert.equal(fs.existsSync(ps()[0].data.file), false, 'the temporary file is deleted');
+      assert.match((await call(c, 'list_apps')).text, /2 applications[\s\S]*Notepad {2}\(C:\\ProgramData/);
+      h.reset();
+      await call(c, 'launch_app', { name_or_path: 'excel', args: ['C:\\My Files\\a.xlsx'] });
+      assert.deepEqual(ps().map((x) => [x.tag, x.data]), [['list_apps', {}], ['launch_app', { file: 'excel', args: ['"C:\\My Files\\a.xlsx"'] }]]);
+      h.reset();
+      const r = await call(c, 'app_read_text', { window: 'Notepad' });
+      assert.ok(r.text.endsWith('\nhello windows ✓'), r.text);
+      const [list, read] = ps();
+      assert.equal(list.tag, 'list_windows');
+      assert.equal(read.tag, 'app_read_text');
+      assert.equal(read.data.pid, 4242);
+      assert.match(read.data.sentinel, /^agent-companion-clipboard-check-/);
+      assert.match(read.script, /Get-Clipboard[\s\S]*Set-Clipboard -Value \$d\.sentinel[\s\S]*SendKeys\('\^a'\)[\s\S]*SendKeys\('\^c'\)[\s\S]*finally\{[\s\S]*Set-Clipboard -Value \$saved/);
+      h.reset();
+      await call(c, 'app_write_text', { window: 'Notepad', text: 'tail', mode: 'append' });
+      assert.deepEqual({ ...ps()[1].data, wait: undefined }, { pid: 4242, text: 'tail', keys: '^{END}^v', wait: undefined });
+      const file = path.join(tmpDir('docs'), 'notes.txt');
+      fs.writeFileSync(file, 'x');
+      h.reset();
+      const op = await call(c, 'app_open_file', { path: file, app: 'notepad' });
+      assert.deepEqual(ps()[0].data, { path: file, app: 'notepad', base: 'notes.txt', stem: 'notes' });
+      assert.match(op.text, /Window: 4242 {2}notepad — notes\.txt - Notepad/);
+      h.reset();
+      const run = await call(c, 'run_powershell', { script: '$x = 1 + 1\n$x' });
+      assert.equal(run.text, 'Exit code: 0\n--- output ---\n2');
+      assert.equal(ps()[0].tag, 'run_powershell');
+      assert.equal(ps()[0].stdin, '$x = 1 + 1\n$x');
+      assert.match(ps()[0].script, /ReadToEnd\(\);\. \(\[scriptblock\]::Create/);
+      assert.ok(h.calls('powershell')[0].args.includes('-NonInteractive') && h.calls('powershell')[0].args.includes('-NoProfile'));
+      const mac = await call(c, 'run_applescript', { script: 'return 1' });
+      assert.match(mac.text, /only available on macOS/);
     } finally {
       await c.stop();
     }

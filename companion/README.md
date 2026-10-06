@@ -3,7 +3,9 @@
 A small program that runs on your computer and gives the Agent Automation extension tools for that computer. Chrome extensions cannot start programs themselves, so the companion does it for them.
 
 - **Built-in tools:** `run_command` (shell), `read_file`, `write_file`, `list_directory`, `find_files`, `open_path`, `clipboard_read`, `clipboard_write`, `system_info`.
-- **Desktop tools** (Linux and macOS): `list_apps`, `launch_app`, `list_windows`, `focus_window`, `close_window`, `desktop_screenshot`, `send_keys`, `type_in_app`. See [Desktop tools](#desktop-tools).
+- **Terminal sessions:** `terminal_open`, `terminal_send`, `terminal_read`, `terminal_interrupt`, `terminal_close`, `terminal_list`: shells that stay open, so the agent can run a command, read the answer and continue. See [Terminal sessions](#terminal-sessions).
+- **Desktop tools:** `list_apps`, `launch_app`, `list_windows`, `focus_window`, `close_window`, `desktop_screenshot`, `send_keys`, `type_in_app`. See [Desktop tools](#desktop-tools).
+- **Application tools:** `app_open_file`, `app_read_text`, `app_write_text`, and `run_applescript` (macOS) or `run_powershell` (Windows), to read and change what is in TextEdit, Notepad, Excel and other apps. See [Working in applications](#working-in-applications).
 - **Local MCP servers:** it starts the stdio MCP servers you configure (`npx …`, `uvx …`, `docker …`) and passes their tools to the agent as `<server>__<tool>`.
 - **Remote access:** with one click it opens a Cloudflare tunnel, so a browser on another computer can use your local models (LM Studio, Ollama, …) through the companion. See [Remote access](#remote-access-cloudflare-tunnel).
 
@@ -18,7 +20,7 @@ node agent-companion.mjs
 It prints something like:
 
 ```
-Agent Automation companion 1.2.0
+Agent Automation companion 1.3.0
   URL      http://127.0.0.1:8765
   Token    3f9a…
 Paste the token into the extension: Settings → Computer tools
@@ -34,9 +36,9 @@ The companion can run commands as you, so it only accepts requests that pass all
 
 - **Only this computer can reach it.** It listens on `127.0.0.1`, which other computers cannot connect to.
 - **A secret token is required.** Every request except a basic "are you running?" check must carry the token. The token is a random 64-character code. It is created on first start and stored in `companion.json`, which only your user account can read.
-- **Websites are blocked.** Requests from web pages are refused, even if a page somehow had the token. This includes pages served from your own computer, such as a development server on another port: a page on `localhost` or `127.0.0.1` is accepted only when it uses the companion's own port. The companion accepts requests only from the extension and from local tools that send no web-page origin. It sends no CORS headers and refuses requests addressed to any name other than `127.0.0.1` or `localhost`, which blocks DNS-rebinding attacks.
+- **Websites are blocked.** Requests from web pages are refused, even if a page somehow had the token. This includes pages served from your own computer, such as a development server on another port: a page on `localhost` or `127.0.0.1` is accepted only when it uses the companion's own port. The companion accepts requests only from the extension and from local tools that send no web-page origin. It sends no CORS headers and refuses requests addressed to any name other than `127.0.0.1` or `localhost`, which blocks DNS-rebinding attacks. The one exception is the model proxy (`/llm/…`), which web apps that have the token may use: see [Use with other apps](#use-with-other-apps).
 - **You approve every action.** By default the extension asks before each computer tool runs, even when you have chosen "auto" for browser actions. You can change this in Settings → Computer tools.
-- **You can switch off risky tools.** Turning off "shell commands" (`allowShell`) removes `run_command` and `open_path`. Turning off "file writing" (`allowWrite`) removes `write_file`.
+- **You can switch off risky tools.** Turning off "shell commands" (`allowShell`) removes `run_command`, `open_path`, the terminal sessions, `run_applescript` and `run_powershell`. Turning off "file writing" (`allowWrite`) removes `write_file`. Turning off "desktop tools" (`desktopTools`) removes the desktop and application tools.
 
 Everything the agent runs is listed in the companion window and in `companion.log`. Calls that come through the tunnel are marked `[through the tunnel]`.
 
@@ -86,9 +88,9 @@ In **Settings → Remote access**, **Start tunnel** gives the companion a public
 
 Settings, `/config` and the tunnel controls are refused with "403" through the tunnel. They work only on this computer.
 
-**How it is protected.** Every request through the tunnel needs the companion's token, like local requests. The address alone is not enough. After 10 wrong tokens from one address, that address is blocked for 15 minutes. The connection between the other browser and Cloudflare is encrypted (HTTPS). Requests from web pages are refused; only the extension (Chrome or Firefox) can use the tunnel. Anyone who has both the address and the token can use what you expose, so treat the connection code like a password.
+**How it is protected.** Every request through the tunnel needs the companion's token, like local requests. The address alone is not enough. After 10 wrong tokens from one address, that address is blocked for 15 minutes. The connection between the other browser and Cloudflare is encrypted (HTTPS). Web pages cannot reach the settings, the tunnel controls or the computer tools; only the model proxy (`/llm/…`) accepts browser-based apps, and only with the token. Anyone who has both the address and the token can use what you expose, so treat the connection code like a password.
 
-**Connect the other browser.** Settings → Remote access shows a connection code (`aa1:…`). It holds the address, the token and the model addresses. In the other browser, open **Settings → Providers → Add from connection code** and paste it.
+**Connect the other browser.** Settings → Remote access shows a connection code (`aa1:…`). It holds the address, the token and the model addresses. In the other browser, open **Settings → Models & providers → Add from connection code** and paste it.
 
 **The address changes.** A quick tunnel gets a new random `https://….trycloudflare.com` address each time it starts, including after the companion restarts. Paste the new connection code into the other browser when that happens. Turn on **Start tunnel when the companion starts** (`autostart`) to have it come back on its own; if cloudflared stops unexpectedly it is then restarted after 1, 5, 15, 30 and 60 seconds.
 
@@ -113,8 +115,27 @@ Settings, `/config` and the tunnel controls are refused with "403" through the t
 |---|---|
 | `POST https://….trycloudflare.com/llm/lmstudio/chat/completions` | `POST http://localhost:1234/v1/chat/completions` |
 | `GET http://127.0.0.1:8765/llm/lmstudio/models` | `GET http://localhost:1234/v1/models` |
+| `GET https://….trycloudflare.com/llm/lmstudio/v1/models` | `GET http://localhost:1234/v1/models` (when the base URL ends with `/v1`, a second `/v1` is dropped) |
+| `GET https://….trycloudflare.com/llm/lmstudio` | the model server's base URL, or a short list of the endpoints if it has nothing there |
 
 So in an OpenAI-compatible client the base URL is `<companion address>/llm/<name>` and the API key is the companion's token. Every method works. Bodies and answers are passed through as they are, including streamed answers (server-sent events), which arrive piece by piece. The `Authorization` header is replaced: the model server gets none, or `Bearer <apiKey>` if you set an `apiKey` for it. If the model server is not running you get a "502" with a message such as `LM Studio is not running at http://localhost:1234/v1`. Closing the request (the Stop button) also stops the request to the model server. A streamed answer may pause for up to 10 minutes between pieces. Through the tunnel, Cloudflare gives up when an answer has not started within about 100 seconds ("524"), so use streaming for slow models.
+
+### Use with other apps
+
+The tunnel works as an OpenAI-compatible API, so any AI chat app or tool that lets you add an "OpenAI-compatible" provider can use your local models, not only this extension:
+
+- **Base URL:** `https://<link>/llm/<name>`, for example `https://mins-conference-replace-mutual.trycloudflare.com/llm/lmstudio`. Apps that add `/v1` themselves, or want it in the base URL, work too. The link on its own is not a base URL: opening it in a browser, or an app asking it for `/models` or `/v1/…`, gets a "404" whose message points to `<link>/llm/<name>`.
+- **API key:** the companion token (it is also inside the connection code).
+- **Model:** a name listed by `https://<link>/llm/<name>/models`.
+
+```sh
+curl https://<link>/llm/lmstudio/chat/completions \
+  -H "Authorization: Bearer <companion token>" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "<model name>", "messages": [{"role": "user", "content": "Hello"}], "stream": true}'
+```
+
+Web apps work as well: the model proxy, and only the model proxy, answers browser preflight requests (CORS) from any website, because every request still needs the token and no cookies are used. After 10 wrong tokens from one website on this computer, or from one address through the tunnel, that website or address is blocked for 15 minutes. The rest of the companion (`/mcp`, settings, tunnel controls) still refuses all web pages.
 
 ## Desktop tools
 
@@ -144,7 +165,56 @@ These let the agent work with other programs on your screen. Like every computer
 
 `gtk-launch` (part of GTK) is used to start applications when it is installed. On Wayland, GNOME and KDE do not let other programs list, focus or close windows, so those three tools are not offered there (apps that run through XWayland can be reached when `wmctrl` is installed). Choose an "X11"/"Xorg" session at the login screen if you need them. If the companion runs as a systemd service and the desktop tools say "No graphical session", run `systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XDG_SESSION_TYPE` and restart it.
 
-**Windows:** desktop tools are not available yet.
+**Windows:** the desktop tools work through Windows PowerShell, which is part of Windows. **They have not been tested on Windows yet.** See [Working in applications](#working-in-applications).
+
+## Terminal sessions
+
+`run_command` runs one command and forgets everything. A terminal session is a shell that stays open, so the agent can work the way you do in a terminal window: run a command, read what it printed, decide, run the next one. The folder it `cd`'d into, the variables it `export`ed and the programs still running (a Python prompt, `ssh`, a database client, a long build) are all still there on the next call.
+
+| Tool | What it does |
+|---|---|
+| `terminal_open` | Starts a session: your own shell (or `shell`, such as `bash` or `python3`), in your home folder or in `cwd`, with an optional `name`. |
+| `terminal_send` | Types `input`, presses Enter, and returns what the session printed. Control keys work too, such as Ctrl-C (`\u0003`) or Ctrl-D (`\u0004`). |
+| `terminal_read` | Returns what was printed since the last call; it can wait for the running command to finish or for some text. |
+| `terminal_interrupt` | Presses Ctrl-C to stop the running command. |
+| `terminal_close` | Ends the session and everything running in it. |
+| `terminal_list` | Lists the open sessions, what runs in them and their folders. |
+
+Like every computer tool, each one asks for your approval first in the extension. `terminal_read` and `terminal_list` only look and are marked read-only, which matters when another browser reaches this computer as a remote MCP server: there they skip the question in "Ask before acting" mode.
+
+**When a call comes back.** `terminal_send` returns as soon as the command has finished (the shell shows its prompt again; the result gives the exit code and the current folder), or when the text in `wait_for` appears (for example `password:` or `>>> `), or when nothing new was printed for `quiet_ms` (0.8 seconds by default: the program is probably waiting for input), or after `timeout_sec` (30 seconds by default, at most 10 minutes). If a program is still running, the result says so and names it, and the agent can answer it, wait with `terminal_read`, or stop it with `terminal_interrupt`. The output comes back as plain text: colors and other terminal codes are removed, a progress bar shows only its last state, and the command the agent typed is not repeated.
+
+**A real terminal.** On macOS and Linux the shell runs on a pseudo-terminal, so programs behave as in a terminal window: `sudo` and `ssh` can ask for a password, `python3` and `node` show their prompts, Ctrl-C stops the running program. The companion gets the terminal from the `script` program that comes with macOS and Linux, or from Python when `script` is missing. With neither, the session runs on plain pipes and says so; programs that insist on a terminal may then not work. A session presents itself as a simple terminal (`TERM=dumb`, 200 columns), so full-screen programs such as `vim`, `top` or `less` are of no use there; the agent is told to use their non-interactive forms instead.
+
+**Your shell, slightly adjusted.** A session runs your login shell (zsh or bash; if yours is fish, bash) with your usual start-up files, prompt and PATH. For zsh and bash the companion adds an invisible marker before each prompt, so it knows exactly when a command has finished. It also keeps the agent's command history apart from yours (in `~/.agent-automation/terminal/`), allows `#` comments, and turns off `!` history expansion, which would otherwise mangle commands such as `echo "done!"`. The small start-up files that do this are in `~/.agent-automation/terminal/` and are rewritten whenever a session starts. Inside a session `AGENT_AUTOMATION_TERMINAL` is set, in case your own start-up files should behave differently there.
+
+**Limits and clean-up.** At most 8 sessions run at a time. A session keeps the last 256 KB of output the agent has not read yet; one call returns at most 60,000 characters (the beginning and the end, with a note saying how much was left out). A session that the agent has not used and that printed nothing for 30 minutes is closed (`terminalIdleMinutes` in the settings; 0 means never). **Close all terminal sessions** in Settings → Computer tools closes them at once (`POST /terminals/close-all`); stopping the companion and turning off shell commands do too. Closing a session also ends what was started in it, including background jobs; a program started with `nohup` keeps running.
+
+**Passwords.** When the agent answers something that looks like a password prompt, `companion.log` shows only the length of the answer. (Programs turn off the echo while you type a password, so the answer does not appear in the session's output either.)
+
+**Windows.** A session is Windows PowerShell connected through plain pipes. A real console (ConPTY) would need native code, which a one-file companion cannot include, so console programs that ask questions or draw on the screen may not work there; commands and scripts do. `terminal_interrupt` ends the programs started from the session. **This has not been tested on Windows yet.**
+
+## Working in applications
+
+To let the agent work inside your applications (write in TextEdit or Notepad, fill in an Excel sheet, read a document that is open), the companion offers these tools besides the desktop tools above. They are part of the desktop tools and can be turned off with them.
+
+| Tool | Where | What it does |
+|---|---|---|
+| `app_open_file` | all | Opens a file in its default application or a named one, and reports the window that shows it. |
+| `app_read_text` | all | Reads all the text in an app window: Select All and Copy, then the clipboard is read. |
+| `app_write_text` | all | Replaces, appends or inserts text in an app window by pasting it. |
+| `run_applescript` | macOS | Runs AppleScript or JavaScript for Automation (`osascript`) and returns the result. |
+| `run_powershell` | Windows | Runs a PowerShell script, for example to control Excel or Word through COM. |
+
+**Reading and writing through the clipboard** works with almost any app that edits text: TextEdit, Notepad, gedit, VS Code, text fields on web pages. `app_read_text` brings the window to the front, presses Select All and Copy (cmd+A cmd+C on macOS, Ctrl+A Ctrl+C elsewhere), reads the clipboard, then presses → so the text is no longer selected and typing next cannot replace it. The cells of a spreadsheet come back as tab-separated text. `app_write_text` puts the text on the clipboard, brings the window to the front, then selects everything and pastes over it (`replace`), moves to the end and pastes (`append`: cmd+↓ on macOS, Ctrl+End elsewhere), or pastes at the cursor (`insert`). Saving is a separate step (`send_keys` with cmd+S or Ctrl+S). Both put your clipboard back afterwards, **but only text**: an image or a file you had copied is gone. Both press keys in that window for a moment, so don't type while they run. They need what `send_keys` needs, and on Linux a clipboard program too: `xclip` or `xsel` (X11, `sudo apt install xclip`) or `wl-clipboard` (Wayland). `app_read_text` changes the selection and the clipboard briefly, so it is not marked read-only.
+
+**AppleScript (macOS)** is the precise way into apps that can be scripted: TextEdit, Pages, Numbers, Keynote, Microsoft Excel and Word, Mail, Safari, Finder, Terminal and many more. The tool's description gives the agent examples to adapt, such as `tell application "Microsoft Excel" to get value of range "A1:C5" of active sheet` or `tell application "TextEdit" to set text of front document to "…"`. The first time a script controls an app, macOS asks whether your terminal app (or `node`, when the companion starts at login) may control it, and the script waits for your answer. You can change this later in System Settings → Privacy & Security → **Automation**. Scripts can also run shell commands, so `run_applescript` is off when shell commands are off.
+
+**PowerShell (Windows)** reaches Office through COM: `New-Object -ComObject Excel.Application` or `Word.Application`, or an Excel that is already open. It runs any PowerShell, so it too is off when shell commands are off.
+
+**Linux** has no common way to script applications. The clipboard pair, `send_keys`, `type_in_app` and screenshots cover editors. For office documents, LibreOffice's command line is the reliable route, through `run_command` or a terminal session: `soffice --headless --convert-to xlsx report.csv` (or `--convert-to csv`, `pdf`, `docx`, …), and macros with `soffice --headless "macro:///Standard.Module1.Main"`. The extension's `read_file` already reads the .xlsx and .docx files this produces.
+
+**Windows desktop tools.** On Windows all desktop and application tools go through Windows PowerShell: windows are listed with `Get-Process` and brought to the front with `WScript.Shell` (Windows sometimes refuses to let a background program do that), keys are sent with SendKeys (the Windows key cannot be pressed), screenshots use System.Drawing, and the applications come from the Start menu and the App Paths registry key. **They have not been tested on Windows yet**, and Settings → Computer tools says so.
 
 ## Settings file
 
@@ -157,6 +227,7 @@ The settings live in `~/.agent-automation/companion.json`. You normally change t
   "allowWrite": true,
   "commandTimeoutSec": 120,
   "desktopTools": true,
+  "terminalIdleMinutes": 30,
   "mcpServers": {},
   "llmUpstreams": {
     "lmstudio": { "url": "http://localhost:1234/v1" },
@@ -167,6 +238,7 @@ The settings live in `~/.agent-automation/companion.json`. You normally change t
 ```
 
 - `commandTimeoutSec` is how long a shell command may run before it is stopped, together with everything it started. The agent can ask for a different limit for a single command.
+- `terminalIdleMinutes` is how long a terminal session may sit unused (and silent) before it is closed. Decimals are allowed; `0` means never.
 - `llmUpstreams` are the model servers reachable at `/llm/<name>/…`. Names may use letters, digits, `_` and `-`, up to 32 characters. An optional `"apiKey"` is sent to that server as `Authorization: Bearer …`; the extension can set it but never read it back.
 - `tunnel`: `kind` is `"quick"` or `"named"`; a named tunnel also has `namedToken` (never shown by the extension) and `namedUrl` (its public address).
 - If the file is damaged, the companion saves it as `companion.json.broken-<time>`, keeps the token if it can still read it, and starts with the default settings.
@@ -213,10 +285,14 @@ The `mcpServers` section uses the same format as Claude Desktop's configuration,
 - **The other browser gets "403".** The path is not shared through the tunnel: turn on "Expose local models" or "Expose computer tools", or tick the model in the list. **"401"**: paste the current connection code again. **"429"**: too many wrong tokens; wait 15 minutes.
 - **The other browser stopped working after a restart.** A quick tunnel's address changes each time it starts. Copy the new connection code, or use a named tunnel.
 - **A desktop tool says "osascript did not answer" (macOS).** macOS is showing a permission dialog. Click OK, then try again. See [Desktop tools](#desktop-tools).
+- **`run_applescript` says "Not authorized to send Apple events".** You clicked "Don't Allow" when macOS asked. Allow it in System Settings → Privacy & Security → Automation.
+- **`app_read_text` says "Nothing was copied".** The window had no text field with the keyboard focus, or the app does not copy text. Click into the text once, or use `run_applescript` / `run_powershell` for that app.
+- **A terminal session says it uses "plain pipes".** Neither `script` nor `python3` was found. On Linux install util-linux (`script`) or Python 3.
+- **A terminal session's start-up looks stuck.** Your shell's start-up files may be asking something (for example an update question). The agent sees the question and can answer it. To skip such steps in agent sessions, check for `AGENT_AUTOMATION_TERMINAL` in your start-up files.
 - **Logs:** `~/.agent-automation/companion.log`. It is capped at about 2 MB; one older copy is kept as `companion.log.1`. The tunnel has its own log, `tunnel.log`.
 
 ## Development
 
-Run the tests with `node --test companion/test.mjs`. They use temporary folders and random ports, and they never touch your real settings, clipboard, desktop or login items. Tunnels in the tests use a fake cloudflared and never reach the network; desktop tools use stand-in helper programs.
+Run the tests with `node --test companion/test.mjs`. They use temporary folders and random ports, and they never touch your real settings, clipboard, desktop or login items. Tunnels in the tests use a fake cloudflared and never reach the network; desktop and application tools use stand-in helper programs (including a small fake editor and clipboard, and a fake `powershell` for the Windows paths, which are checked only for the commands they would run). Terminal sessions run real shells (`bash`, `zsh`, `python3 -i`, `cat`, `sleep`) as hidden processes in temporary folders, and `run_applescript` runs `return 1 + 1` once on macOS.
 
 Opt-in extras: `COMPANION_TEST_TUNNEL=1` opens one real quick tunnel through the installed cloudflared and stops it again; `COMPANION_TEST_DOWNLOAD=1` downloads the real cloudflared into a temporary folder; `COMPANION_TEST_DESKTOP=1` (macOS) runs `list_apps`, `list_windows` and `desktop_screenshot` for real (nothing is typed or clicked); `COMPANION_TEST_CLIPBOARD=1` uses the real clipboard.

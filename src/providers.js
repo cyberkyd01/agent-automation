@@ -1,4 +1,4 @@
-import { httpError, newId, safeParse, sseEvents } from './util.js';
+import { httpError, isPrivate, newId, safeParse, sseEvents } from './util.js';
 
 const trimSlash = (u) => (u || '').replace(/\/+$/, '');
 const anthropicBase = (p) => trimSlash(p.baseUrl || 'https://api.anthropic.com').replace(/\/v1$/, '');
@@ -39,23 +39,88 @@ function streamError(message, code) {
 }
 const ANTHROPIC_STREAM_CODES = { overloaded_error: 529, api_error: 500, rate_limit_error: 429 };
 
+// LM Studio lists every downloaded model on /v1/models, loaded or not. Its own API says which are loaded:
+// GET <origin>/api/v0/models → { data: [{ id, type: 'llm' | 'vlm' | 'embeddings' | …, state: 'loaded' | 'not-loaded' }] }.
+// Only asked of a model server on this computer or network, and never through the companion's /llm/<name> proxy.
+const LMSTUDIO_TIMEOUT = 2000;
+
+function lmStudioUrl(p) {
+  try {
+    const u = new URL(trimSlash(p.baseUrl));
+    if (!/^https?:$/.test(u.protocol) || !isPrivate(u.hostname) || /(^|\/)llm(\/|$)/.test(u.pathname)) return '';
+    return `${u.origin}/api/v0/models`;
+  } catch {
+    return '';
+  }
+}
+
+// → { loaded: [ids, in LM Studio's order], types: { id: type } }, or null when there is no such answer.
+async function lmStudioModels(p, signal) {
+  const url = lmStudioUrl(p);
+  if (!url || signal?.aborted) return null;
+  const ctl = new AbortController();
+  const stop = () => ctl.abort();
+  const timer = setTimeout(stop, LMSTUDIO_TIMEOUT);
+  signal?.addEventListener('abort', stop, { once: true });
+  try {
+    const res = await fetch(url, { headers: openaiHeaders(p), signal: ctl.signal });
+    if (!res.ok) return null;
+    const data = (await res.json())?.data;
+    if (!Array.isArray(data)) return null;
+    const out = { loaded: [], types: {} };
+    for (const m of data) {
+      if (typeof m?.id !== 'string' || !m.id) continue;
+      if (typeof m.type === 'string') out.types[m.id] = m.type;
+      if (m.state === 'loaded' && !out.loaded.includes(m.id)) out.loaded.push(m.id);
+    }
+    return out;
+  } catch {
+    return null; // not LM Studio, too slow, or not JSON: the plain list is all there is
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', stop);
+  }
+}
+
+// The model ids of a provider. For LM Studio it also records which are loaded (p.loadedModels, p.modelTypes) and
+// lists those first, so the default is a model that is ready rather than one that has to be loaded first.
 export async function listModels(p, signal) {
   if (p.type === 'anthropic') {
+    delete p.loadedModels;
+    delete p.modelTypes;
     const res = await doFetch(anthropicBase(p) + '/v1/models?limit=1000', { headers: anthropicHeaders(p), signal }, p);
     return ((await res.json()).data || []).map((m) => m.id);
   }
   const res = await doFetch(trimSlash(p.baseUrl) + '/models', { headers: openaiHeaders(p), signal }, p);
   const j = await res.json();
-  return (j.data || j.models || [])
+  const ids = (j.data || j.models || [])
     .map((m) => m.id || m.name)
     .filter(Boolean)
     .sort();
+  const lm = await lmStudioModels(p, signal);
+  if (!lm) {
+    delete p.loadedModels;
+    delete p.modelTypes;
+    return ids;
+  }
+  p.loadedModels = lm.loaded;
+  p.modelTypes = lm.types;
+  const have = new Set(ids);
+  const first = lm.loaded.filter((id) => have.has(id));
+  const isFirst = new Set(first);
+  return [...first, ...ids.filter((id) => !isFirst.has(id))];
 }
 
-// Default to a chat model: local servers also list embedding, image and speech models.
-export function pickModel(models) {
+// " · loaded" after the id of a model that LM Studio has loaded (text only: the option's value stays the id).
+export const modelLabel = (p, id) => (p?.loadedModels?.includes(id) ? `${id} · loaded` : id);
+
+// Default to a chat model: local servers also list embedding, image and speech models. A model that is already
+// loaded wins (`loaded`: ids; `types`: { id: type } when the server says what each model is).
+export function pickModel(models, loaded = [], types = {}) {
   const other = /embed|rerank|image|diffusion|flux|sdxl|dall-e|whisper|tts|speech|moderation/i;
-  return models.find((m) => !other.test(m)) || models[0] || '';
+  const chat = (m) => (types?.[m] ? /^(llm|vlm)$/i.test(types[m]) : !other.test(m));
+  const ready = (loaded || []).find((m) => models.includes(m) && chat(m));
+  return ready || models.find((m) => !other.test(m)) || models[0] || '';
 }
 
 /* ---------- prompted tool calling (for models/servers without native tools) ---------- */

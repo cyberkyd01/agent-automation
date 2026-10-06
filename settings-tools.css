@@ -1,5 +1,6 @@
-/* Styles for the "Computer tools", "Remote access" and "Remote MCP servers" Settings sections and the Providers
-   "Add from connection code" form (src/settings-tools-ui.js).
+/* Styles for Settings (src/settings-ui.js, src/settings-tools-ui.js): the home page with its area cards and
+   status pills, the pages with their group cards, guided steps and Advanced blocks, and the Computer tools,
+   Remote access, Remote MCP and "Add from connection code" parts.
    Loaded after sidepanel.css: reuses its tokens and the .btn / .field / .card / .hint / .test-result classes,
    and only adds what is new. */
 
@@ -7,6 +8,12 @@
   --warn: #8a5300;
   --warn-bg: #fff6e3;
   --warn-border: #f0d9a6;
+  --on-accent: #ffffff;
+  /* Settings: a tinted page with white cards (light); cards lighter than the page (dark). */
+  --set-page: var(--surface);
+  --set-card: var(--bg);
+  --set-item: var(--surface);
+  --set-hover: var(--surface);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -14,6 +21,11 @@
     --warn: #f0b955;
     --warn-bg: rgba(240, 185, 85, 0.09);
     --warn-border: rgba(240, 185, 85, 0.32);
+    --on-accent: #ffffff;
+    --set-page: var(--bg);
+    --set-card: var(--surface);
+    --set-item: var(--surface-2);
+    --set-hover: var(--surface-2);
   }
 }
 
@@ -309,9 +321,8 @@ textarea.ctl[aria-invalid='true']:focus {
 .tools-manage {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding-top: 12px;
-  border-top: 1px solid var(--border);
+  gap: 8px;
+  min-width: 0;
 }
 
 .tools-manage-head {
@@ -319,6 +330,8 @@ textarea.ctl[aria-invalid='true']:focus {
   align-items: center;
   justify-content: space-between;
   gap: 6px;
+  min-height: 32px;
+  padding: 4px 2px 0;
 }
 
 .tools-sub {
@@ -438,13 +451,13 @@ textarea.ctl[aria-invalid='true']:focus {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 8px 0 4px;
+  padding: 8px 0;
   border-top: 1px solid var(--border);
-  background: var(--bg);
+  background: var(--set-page);
 }
 
 /* Keyboard focus scrolls fields into view: keep them clear of the sticky bar above (which grows with its messages). */
-#settingsBody:has(#companionEditor:not([hidden])) {
+#settingsBody:has(#settingsPage[data-section='computer'] #companionApplyBar:not([hidden])) {
   scroll-padding-bottom: 168px;
 }
 
@@ -534,6 +547,17 @@ textarea.ctl[aria-invalid='true']:focus {
   overflow-wrap: anywhere;
 }
 
+.desktop-notes {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.desktop-notes > .hint {
+  margin: 0;
+}
+
 .desktop-chips {
   display: flex;
   flex-wrap: wrap;
@@ -569,6 +593,52 @@ textarea.ctl[aria-invalid='true']:focus {
   margin-top: 3px;
 }
 
+/* ---------- terminal sessions ---------- */
+
+.tools-terminals,
+.terminal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.tools-terminals {
+  padding: 12px 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.tools-terminals .hint {
+  margin: 0;
+}
+
+.terminal-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.terminal-row {
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.terminal-name {
+  font: 600 12px/1.45 var(--mono);
+}
+
+.terminal-meta {
+  color: var(--muted);
+}
+
 /* ---------- remote access ---------- */
 
 .set-section > .hint.tunnel-off {
@@ -578,7 +648,7 @@ textarea.ctl[aria-invalid='true']:focus {
 .tunnel-body {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 8px;
   min-width: 0;
 }
 
@@ -762,4 +832,854 @@ textarea.ctl[aria-invalid='true']:focus {
 
 .tunnel-block > .tunnel-code-note {
   margin-top: 3px;
+}
+
+/* ---------- remote access: use with other apps, empty-list warnings ---------- */
+
+.tunnel-no-models {
+  margin-top: 4px;
+}
+
+.tunnel-auto-note {
+  margin: 0;
+}
+
+.tunnel-apps {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.tunnel-apps > .hint,
+.tunnel-app-rows > .hint {
+  margin: 0;
+}
+
+.tunnel-app-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.remote-app {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.remote-app-name {
+  font: 600 12.5px/1.4 var(--mono);
+  overflow-wrap: anywhere;
+}
+
+.remote-app-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.remote-app-field > .codeblock {
+  margin-top: 0;
+}
+
+.remote-app-field > .hint {
+  margin: 0;
+}
+
+.tunnel-curl-holder > .codeblock {
+  margin-top: 0;
+}
+
+.tunnel-curl > .tools-setup-body > .hint {
+  margin: 0 0 6px;
+}
+
+/* ================= Settings: home, pages, cards, steps ================= */
+
+.ico {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.settings-home,
+.settings-page,
+.settings-area,
+.area-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.settings-home.enter {
+  animation: settings-fade 0.16s ease-out;
+}
+
+.settings-area.enter {
+  animation: settings-slide 0.18s ease-out;
+}
+
+@keyframes settings-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes settings-slide {
+  from {
+    opacity: 0;
+    transform: translateX(10px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-home.enter,
+  .settings-area.enter {
+    animation: none;
+  }
+
+  .step-chev,
+  .advanced > summary::before {
+    transition: none;
+  }
+}
+
+.settings-notice {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--err-border);
+  border-radius: 8px;
+  background: var(--err-bg);
+  color: var(--err);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.render-error {
+  margin: 0;
+}
+
+.save-error {
+  margin-top: 2px;
+}
+
+/* --- status pills --- */
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-height: 22px;
+  padding: 2px 9px;
+  border-radius: 11px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.pill::before {
+  content: '';
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.pill[data-state='ok'] {
+  background: color-mix(in srgb, var(--ok) 13%, transparent);
+  color: var(--ok);
+}
+
+.pill[data-state='warn'] {
+  background: var(--warn-bg);
+  color: var(--warn);
+  box-shadow: inset 0 0 0 1px var(--warn-border);
+}
+
+.pill[data-state='error'] {
+  background: var(--err-bg);
+  color: var(--err);
+  box-shadow: inset 0 0 0 1px var(--err-border);
+}
+
+.pill[data-state='info'] {
+  background: var(--accent-soft);
+  color: var(--link);
+}
+
+/* --- home: area cards --- */
+
+.settings-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.settings-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--set-card);
+  color: var(--fg);
+  text-align: left;
+  cursor: pointer;
+}
+
+.settings-card:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+
+.settings-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.settings-card-icon,
+.area-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: var(--accent-soft);
+  color: var(--link);
+}
+
+.settings-card-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.settings-card-name {
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.settings-card-purpose {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.settings-card-text > .pill {
+  margin-top: 6px;
+}
+
+.settings-card-chev {
+  align-self: center;
+  width: 16px;
+  height: 16px;
+  color: var(--faint);
+}
+
+.settings-note {
+  margin: 0;
+  text-align: center;
+}
+
+/* --- home: getting started --- */
+
+.gs-card {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+}
+
+.gs-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--link);
+}
+
+.gs-head > .set-card-title {
+  color: var(--fg);
+}
+
+.gs-steps {
+  gap: 0;
+}
+
+.gs-steps > .step {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.gs-steps > .step + .step {
+  border-top: 1px solid var(--border);
+}
+
+.gs-steps .step-head {
+  min-height: 0;
+  padding: 8px 0;
+}
+
+.gs-steps .step-body {
+  gap: 6px;
+  padding: 0 0 10px 34px;
+}
+
+.gs-steps .step-body > .btn {
+  align-self: flex-start;
+}
+
+/* --- pages --- */
+
+.area-intro {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+  padding: 2px 2px 0;
+}
+
+.area-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+}
+
+.area-intro-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.area-intro-label {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.area-intro-text > p {
+  margin: 1px 0 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.set-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--set-card);
+}
+
+.set-card-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.set-card > p:not(.set-card-hint) {
+  margin: 0;
+}
+
+.set-card-hint {
+  margin: -6px 0 0;
+}
+
+.set-card > .cards {
+  margin-bottom: 0;
+}
+
+.set-card .card,
+.step .card {
+  background: var(--set-item);
+}
+
+.link-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.link-row > .btn.ghost {
+  margin-left: -8px;
+}
+
+.add-option {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+}
+
+.add-option > .hint {
+  margin: 0;
+}
+
+.add-option > .add-select,
+.add-option > .provider-code {
+  align-self: stretch;
+}
+
+.add-option + .add-option {
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.add-option > .provider-code {
+  margin-top: 4px;
+}
+
+/* provider cards */
+
+.prov-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  min-width: 0;
+}
+
+.prov-name {
+  flex: 1 1 110px;
+  min-width: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.prov-use {
+  display: flex;
+  align-items: center;
+  min-height: 20px;
+  margin-top: -6px;
+}
+
+.prov-active {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.prov-use > .btn.ghost {
+  margin-left: -8px;
+  font-size: 12px;
+}
+
+.prov-models {
+  margin: -2px 0 0;
+  overflow-wrap: anywhere;
+}
+
+/* advanced */
+
+.advanced {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--set-card);
+}
+
+.advanced > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 8px 12px;
+  border-radius: 12px;
+  color: var(--muted);
+  font-weight: 600;
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+
+.advanced > summary::-webkit-details-marker {
+  display: none;
+}
+
+.advanced > summary::before {
+  content: '';
+  flex: none;
+  width: 6px;
+  height: 6px;
+  margin: 0 3px 2px 2px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 0.15s;
+}
+
+.advanced[open] > summary::before {
+  margin-bottom: 4px;
+  transform: rotate(45deg);
+}
+
+.advanced > summary:hover {
+  color: var(--fg);
+}
+
+.advanced-body,
+.advanced > .tools-setup-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  padding: 0 12px 12px;
+}
+
+.advanced-body > .hint {
+  margin: 0;
+}
+
+/* --- callouts --- */
+
+.callout {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--set-card);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.callout.warn {
+  border-color: var(--warn-border);
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+.callout-icon {
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+}
+
+.callout-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.callout-text > p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* --- guided steps --- */
+
+.steps {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.step {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--set-card);
+}
+
+.step[data-current] {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+}
+
+.step[data-problem] {
+  border-color: var(--warn-border);
+}
+
+.step-h {
+  margin: 0;
+  font: inherit;
+}
+
+.step-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+
+button.step-head {
+  cursor: pointer;
+}
+
+button.step-head:hover {
+  background: var(--set-hover);
+}
+
+.step-mark {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 1.5px solid var(--border-strong);
+  border-radius: 50%;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.step-check {
+  display: none;
+  width: 14px;
+  height: 14px;
+  stroke-width: 2.6;
+}
+
+.step[data-done='true'] .step-mark {
+  border-color: var(--ok);
+  background: var(--ok);
+  color: var(--bg);
+}
+
+.step[data-done='true'] .step-num {
+  display: none;
+}
+
+.step[data-done='true'] .step-check {
+  display: block;
+}
+
+.step[data-current] .step-mark {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.step[data-problem] .step-mark {
+  border-color: var(--warn);
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+.step-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding-top: 2px;
+}
+
+.step-title {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.step-summary {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.step-tag {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1.6;
+  vertical-align: 1px;
+}
+
+.step-chev {
+  width: 16px;
+  height: 16px;
+  margin-top: 4px;
+  color: var(--faint);
+  transition: transform 0.15s;
+}
+
+.step[data-open='false'] .step-chev {
+  transform: rotate(-90deg);
+}
+
+.step-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  padding: 0 12px 12px 46px;
+}
+
+.step.wide > .step-body {
+  padding-left: 12px;
+}
+
+.step-body > .tools-actions,
+.step-body > .codeblock {
+  margin-top: 0;
+}
+
+.step-body > .btn {
+  align-self: flex-start;
+}
+
+.step-text-p,
+.step-body > p,
+.step-body > .tools-editor > p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.step .tools-terminals {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.step-later {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.step[data-placeholder] {
+  border-style: dashed;
+  background: transparent;
+}
+
+.step[data-placeholder] .step-title {
+  color: var(--muted);
+}
+
+.step-status {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--set-item);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.step-status.ok {
+  border-color: color-mix(in srgb, var(--ok) 35%, transparent);
+  background: color-mix(in srgb, var(--ok) 8%, transparent);
+  color: var(--ok);
+}
+
+.step-status.warn {
+  border-color: var(--warn-border);
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+.step-status.error {
+  border-color: var(--err-border);
+  background: var(--err-bg);
+  color: var(--err);
+}
+
+.step-status.info {
+  background: var(--accent-soft);
+  color: var(--link);
+}
+
+.step-body > .tools-setup-extra {
+  margin-top: 0;
+}
+
+/* Computer tools: steps 4 and 5 sit in the management area, whose Apply bar sticks to the bottom. */
+.tools-manage-head > .tools-sub {
+  color: var(--muted);
+}
+
+.step-body > .tools-desktop,
+.step-body > .tools-editor {
+  min-width: 0;
+}
+
+/* Remote access */
+
+.tunnel-private,
+.tunnel-quick {
+  margin: 0;
+}
+
+.tunnel-advanced > .tools-setup-body > .tools-sub {
+  margin-top: 2px;
+}
+
+/* Narrow panels: step contents use the whole card width. */
+@media (max-width: 360px) {
+  .step-body {
+    padding-left: 12px;
+  }
+
+  .gs-steps .step-body {
+    padding-left: 0;
+  }
+
+  .settings-card {
+    gap: 10px;
+  }
+
+  /* Two fields side by side get too narrow for their values: one per line. */
+  .set-card .row2,
+  .advanced .row2 {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.gs-icon {
+  width: 18px;
+  height: 18px;
+}
+
+.provider-card {
+  gap: 8px;
 }

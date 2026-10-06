@@ -3,7 +3,7 @@
 // the 'panel' port (src/engine/PROTOCOL.md), renders what it is told and sends commands.
 import { fileToAssetData, formatBytes, toBlob } from './src/files.js';
 import { md, stripToolCalls } from './src/markdown.js';
-import { listModels, pickModel } from './src/providers.js';
+import { listModels, modelLabel, pickModel } from './src/providers.js';
 import { isZipFile, sessionToMarkdown, store, titleFrom } from './src/sessions.js';
 import { renderSettings } from './src/settings-ui.js';
 import { loadSettings, saveSettings, syncOriginRules } from './src/storage.js';
@@ -64,6 +64,9 @@ const announceEl = $('announce');
 const settingsEl = $('settings');
 const settingsBody = $('settingsBody');
 const closeSettingsBtn = $('closeSettings');
+const settingsBackBtn = $('settingsBack');
+const settingsTitle = $('settingsTitle');
+const settingsSep = settingsEl.querySelector('.settings-sep');
 const historyEl = $('history');
 const closeHistoryBtn = $('closeHistory');
 const historyImportBtn = $('historyImport');
@@ -87,6 +90,8 @@ const batchAddBtn = $('batchAdd');
 const batchModeInputs = [...document.querySelectorAll('input[name="batchMode"]')];
 
 let settings = null;
+let settingsView = null; // the open Settings (renderSettings' controller)
+let settingsPage = 'home'; // the Settings page last shown in this panel, opened again by the Settings button
 let windowId = null;
 let statusSeq = 0;
 let currentTab = null; // the active browser tab, for session meta and the "This site" filter
@@ -419,6 +424,9 @@ function add(s, node) {
 
 /* ---------- chat views (each bound to one session) ---------- */
 
+// No provider has a model yet: the agent cannot answer, so the first run shows how to connect one.
+const needsModel = () => !settings?.providers?.some((p) => p?.model);
+
 function showEmpty(s) {
   const wrap = el('div', 'empty');
   wrap.append(
@@ -429,6 +437,25 @@ function showEmpty(s) {
       'I can read the page beside me, click, type, fill in forms, open tabs and search the web. In “Ask before acting” mode you approve each action first.'
     )
   );
+  if (settings && needsModel()) {
+    wrap.dataset.setup = '';
+    const card = el('div', 'empty-setup');
+    const body = el('div', 'empty-setup-body');
+    body.append(
+      el('div', 'empty-setup-title', 'Connect a model to start'),
+      el('p', 'empty-setup-text', 'The agent needs an AI model: a model server on this computer (LM Studio, Ollama) or an online service. Add it in Settings, test it, and come back here.'),
+      button('btn primary', 'Open Models & providers', () => openSettings('models'))
+    );
+    body.lastElementChild.dataset.action = 'connect-model';
+    const num = el('span', 'empty-setup-num', '1');
+    num.setAttribute('aria-hidden', 'true');
+    card.append(num, body);
+    wrap.append(card);
+    const rate = repoLink('empty-link', '★ Rate on GitHub');
+    if (rate) wrap.append(rate);
+    s.chat.replaceChildren(wrap);
+    return;
+  }
   const list = el('div', 'suggestions');
   for (const text of SUGGESTIONS) {
     list.append(
@@ -450,6 +477,15 @@ function showEmpty(s) {
 
 function showLoading(s) {
   s.chat.replaceChildren(el('div', 'pane-loading', 'Loading chat…'));
+}
+
+// Re-renders the empty chats when whether a model exists changed (the guided card ↔ the suggestions).
+function refreshEmptyStates() {
+  const want = needsModel();
+  for (const s of sessions.values()) {
+    const e = s.chat.firstElementChild;
+    if (s.chat.childElementCount === 1 && e?.classList.contains('empty') && e.hasAttribute('data-setup') !== want) showEmpty(s);
+  }
 }
 
 function thumb(src, { onRemove, label, s } = {}) {
@@ -744,6 +780,15 @@ function noticeView(s, item) {
       box.append(b);
     }
     n.append(box);
+  }
+  // A tool server could not be reached (src/mcp.js): a deep link to the Settings page that fixes it.
+  const fix = /^Computer companion: /.test(String(item.text ?? '')) ? ['computer', 'Computer tools settings'] : /^MCP server "/.test(String(item.text ?? '')) ? ['mcp', 'Remote MCP settings'] : null;
+  if (fix) {
+    const go = button('btn', fix[1], () => openSettings(fix[0]));
+    go.dataset.action = `open-settings-${fix[0]}`;
+    const links = el('span', 'notice-actions');
+    links.append(go);
+    n.append(links);
   }
   add(s, n);
   return {
@@ -1586,7 +1631,7 @@ function renderModels() {
     return;
   }
   if (!p.model && p.models?.length) {
-    p.model = pickModel(p.models);
+    p.model = pickModel(p.models, p.loadedModels, p.modelTypes);
     saveAll();
   }
   const list = [...(p.models || [])];
@@ -1595,9 +1640,26 @@ function renderModels() {
     const label = loadingModels.has(p.id) ? 'Loading models…' : 'Select a model';
     modelSel.append(option('', label, { disabled: true, selected: true }));
   }
-  for (const m of list) modelSel.append(option(m, m, { selected: m === p.model }));
+  for (const m of list) modelSel.append(option(m, modelLabel(p, m), { selected: m === p.model }));
   modelSel.append(option(CUSTOM_MODEL, 'Custom model ID…'));
   modelSel.title = p.model || 'Model';
+}
+
+// LM Studio loads a model the first time a prompt uses it, which can take a while and uses memory. When the chosen
+// model is not loaded but others are, say so once for this choice. It is only a line in the status bar: a click
+// dismisses it and nothing waits for it. `fresh`: the user just made this choice, so it counts even as a repeat.
+let loadHint = { key: '', seq: 0 };
+
+function hintUnloaded(fresh = false) {
+  const p = activeProvider();
+  const key = p?.model ? `${p.id}\n${p.model}` : '';
+  if (fresh || key !== loadHint.key) {
+    clearStatus(loadHint.seq); // the hint for an earlier choice goes with it
+    loadHint = { key: '', seq: 0 };
+  }
+  if (!key || loadHint.key === key || !p.loadedModels?.length || p.loadedModels.includes(p.model)) return;
+  if (!statusEl.hidden && statusEl.classList.contains('error')) return; // a problem matters more
+  loadHint = { key, seq: setStatus(`${p.model} is not loaded in LM Studio; sending a prompt will load it (this can take a while).`) };
 }
 
 async function fetchModels(p, { quiet = false } = {}) {
@@ -1609,11 +1671,12 @@ async function fetchModels(p, { quiet = false } = {}) {
   try {
     const models = await listModels(p, AbortSignal.timeout(20000));
     p.models = models;
-    if (!p.model) p.model = pickModel(models);
+    if (!p.model) p.model = pickModel(models, p.loadedModels, p.modelTypes);
     await saveAll();
     if (p === activeProvider()) {
       if (!models.length) setStatus(`${p.name} returned no models. Download or load one, then reload.`, 'error');
       else if (seq) clearStatus(seq);
+      hintUnloaded();
     }
   } catch (e) {
     if (p === activeProvider()) setStatus(errText(e), 'error');
@@ -1642,6 +1705,7 @@ function closeCustomModel(commit) {
   if (commit && p && v && v !== p.model) {
     p.model = v;
     saveAll();
+    hintUnloaded(true);
   }
   renderModels();
 }
@@ -1697,20 +1761,74 @@ async function updateTab() {
 
 /* ---------- settings overlay ---------- */
 
-function openSettings() {
+// Saving from Settings: a failure is thrown back, so Settings can put the control back and say why.
+async function saveFromSettings() {
+  approvalSel.value = settings.approval;
+  try {
+    await saveSettings(settings);
+  } finally {
+    // The engine also hears about it from chrome.storage; this makes the change apply at once.
+    tell('settings');
+  }
+}
+
+// Whether the user has given the agent a task yet (for Settings → Getting started): true at once when an open chat
+// has messages, otherwise a promise that looks through the saved chats.
+function anyChat() {
+  for (const s of sessions.values()) if (s.nodes.size || Number(s.meta?.messageCount) > 0) return true;
+  return store.list().then(
+    (list) => list.some((m) => Number(m.messageCount) > 0),
+    () => false
+  );
+}
+
+// The header follows the page: "‹ Back to chat · Settings" on the home page, "‹ Settings · <area> ×" on a page.
+function settingsNavigated({ section, title, focus }) {
+  settingsPage = section;
+  const home = section === 'home';
+  settingsEl.dataset.view = home ? 'home' : 'page';
+  settingsBackBtn.hidden = home;
+  settingsSep.hidden = home;
+  settingsTitle.textContent = title;
+  const label = home ? 'Back to chat' : 'Close settings';
+  closeSettingsBtn.title = label;
+  closeSettingsBtn.setAttribute('aria-label', label);
+  if (focus) settingsBackBtn.focus();
+}
+
+// `section` opens that page directly (a deep link); without one, the page shown last in this panel opens.
+function openSettings(section) {
+  const page = typeof section === 'string' ? section : settingsPage;
   closeCustomModel(false);
-  renderSettings(settingsBody, settings, {
-    save: saveAll,
-    onProvidersChanged: () => {
-      renderProviderSelect();
-      renderModels();
-    },
-  });
+  if (!settingsEl.hidden && settingsView) {
+    settingsView.show(page);
+    return;
+  }
+  settingsEl.dataset.view = 'home';
+  try {
+    settingsView = renderSettings(settingsBody, settings, {
+      save: saveFromSettings,
+      onProvidersChanged: () => {
+        renderProviderSelect();
+        renderModels();
+      },
+      onNavigate: settingsNavigated,
+      onClose: () => closeSettings(),
+      hasChats: anyChat,
+      section: page,
+    });
+  } catch (e) {
+    settingsView = null;
+    settingsNavigated({ section: 'home', title: 'Settings', focus: false });
+    const box = el('div', 'tools-msg error render-error', `Settings could not be displayed: ${errText(e)}`);
+    box.setAttribute('role', 'alert');
+    settingsBody.replaceChildren(box);
+  }
   if (FIREFOX) firefoxSettings();
   appEl.inert = true;
   settingsEl.hidden = false;
-  settingsBody.scrollTop = 0;
-  closeSettingsBtn.focus();
+  if (settingsView?.section === 'home' || !settingsView) closeSettingsBtn.focus();
+  else settingsBackBtn.focus();
 }
 
 function closeSettings() {
@@ -1719,13 +1837,21 @@ function closeSettings() {
   settingsEl.hidden = true;
   appEl.inert = false;
   settingsBody.replaceChildren();
+  settingsView = null;
   approvalSel.value = settings.approval;
   renderProviderSelect();
   renderModels();
   renderQueue();
+  refreshEmptyStates();
   const p = activeProvider();
   if (p && !p.models?.length && (p.baseUrl || p.type === 'anthropic')) fetchModels(p, { quiet: true });
   settingsBtn.focus();
+}
+
+// Escape on a Settings page goes back to the Settings home first; on the home page it closes Settings.
+function settingsEscape() {
+  if (settingsView && settingsView.section !== 'home') settingsView.show('home');
+  else closeSettings();
 }
 
 /* ---------- history overlay ---------- */
@@ -2307,6 +2433,7 @@ function bindEvents() {
     setStatus('');
     renderProviderSelect();
     renderModels();
+    hintUnloaded(true);
     await saveAll();
     const p = activeProvider();
     if (p && !p.models?.length) fetchModels(p);
@@ -2319,6 +2446,7 @@ function bindEvents() {
     p.model = modelSel.value;
     modelSel.title = p.model;
     saveAll();
+    hintUnloaded(true);
   });
 
   modelCustom.addEventListener('keydown', (e) => {
@@ -2335,8 +2463,9 @@ function bindEvents() {
   modelCustom.addEventListener('blur', () => closeCustomModel(true));
 
   reloadBtn.addEventListener('click', () => fetchModels(activeProvider()));
-  settingsBtn.addEventListener('click', openSettings);
+  settingsBtn.addEventListener('click', () => openSettings());
   closeSettingsBtn.addEventListener('click', closeSettings);
+  settingsBackBtn.addEventListener('click', () => settingsView?.show('home'));
   historyBtn.addEventListener('click', openHistory);
   statusEl.addEventListener('click', () => setStatus(''));
 
@@ -2378,7 +2507,7 @@ function bindEvents() {
       closeHistory();
     } else if (!settingsEl.hidden) {
       e.preventDefault();
-      closeSettings();
+      settingsEscape();
     } else if (active?.state?.running && !e.defaultPrevented) {
       // v1.0: Esc stops, wherever the focus is.
       e.preventDefault();
@@ -2596,6 +2725,10 @@ async function init() {
   renderProviderSelect();
   renderModels();
   bindEvents();
+  // A model chosen or loaded anywhere (the header, Settings, another panel) swaps the first-run card for the suggestions.
+  chrome.storage?.onChanged?.addListener((changes, area) => {
+    if (area === 'local' && changes.settings) refreshEmptyStates();
+  });
   autosize();
   updateComposer();
   try {

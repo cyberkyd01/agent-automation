@@ -83,12 +83,18 @@
   </div>
   <div id="announce" class="sr-only" aria-live="polite"></div>
 
-  <section id="settings" aria-label="Settings" hidden>
+  <section id="settings" aria-labelledby="settingsTitle" data-view="home" hidden>
     <div class="settings-head">
-      <button id="closeSettings" class="icon" type="button" title="Back" aria-label="Back to chat">
-        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M15 18l-6-6 6-6"/></svg>
+      <button id="closeSettings" class="icon" type="button" title="Back to chat" aria-label="Back to chat">
+        <svg class="i-back" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M15 18l-6-6 6-6"/></svg>
+        <svg class="i-close" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
-      <h2>Settings</h2>
+      <button id="settingsBack" class="settings-back" type="button" title="All settings" aria-label="Back to all settings" hidden>
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M15 18l-6-6 6-6"/></svg>
+        <span>Settings</span>
+      </button>
+      <span class="settings-sep" aria-hidden="true" hidden>·</span>
+      <h2 id="settingsTitle">Settings</h2>
     </div>
     <div id="settingsBody"></div>
   </section>

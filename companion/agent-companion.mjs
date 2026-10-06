@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Agent Automation companion: a small local program that gives the extension's AI agent tools for this
-// computer (shell, files, clipboard, desktop) and runs stdio MCP servers for it, all behind one MCP endpoint.
+// computer (shell, terminal sessions, files, clipboard, desktop, applications) and runs stdio MCP servers for it,
+// all behind one MCP endpoint.
 // It can also open a Cloudflare tunnel to itself and proxy local LLM servers behind its token.
 // One self-contained file: Node.js 18 or later, no dependencies. Run `node agent-companion.mjs --help`.
 
@@ -13,9 +14,10 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import zlib from 'node:zlib';
 import { spawn } from 'node:child_process';
+import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-const VERSION = '1.2.0';
+const VERSION = '1.3.0';
 const NAME = 'agent-companion';
 const DEFAULT_PORT = 8765;
 const DEFAULT_HOST = '127.0.0.1';
@@ -44,6 +46,7 @@ const DEFAULT_CONFIG = Object.freeze({
   tunnel: { ...DEFAULT_TUNNEL },
   llmUpstreams: {},
   desktopTools: true,
+  terminalIdleMinutes: 30,
 });
 const SERVER_NAME_RE = /^[A-Za-z0-9_-]{1,32}$/;
 const TOKEN_RE = /^[\x21-\x7e]{16,256}$/;
@@ -113,6 +116,15 @@ function userName() {
     return os.userInfo().username;
   } catch {
     return process.env.USER || process.env.USERNAME || '';
+  }
+}
+
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === 'EPERM';
   }
 }
 
@@ -609,7 +621,9 @@ function checkTunnelPatch(t, current) {
 }
 
 // Strict validation for PUT /config: anything wrong rejects the whole request.
-const CONFIG_KEYS = ['allowShell', 'allowWrite', 'commandTimeoutSec', 'mcpServers', 'tunnel', 'llmUpstreams', 'desktopTools'];
+const CONFIG_KEYS = ['allowShell', 'allowWrite', 'commandTimeoutSec', 'mcpServers', 'tunnel', 'llmUpstreams', 'desktopTools', 'terminalIdleMinutes'];
+// 0 = never; otherwise minutes (decimals allowed), at least 0.05 (3 s).
+const validIdleMinutes = (n) => typeof n === 'number' && Number.isFinite(n) && (n === 0 || (n >= 0.05 && n <= 1440));
 function checkConfigPatch(body) {
   if (!isObj(body)) throw new HttpError(400, 'The body must be a JSON object.');
   for (const k of Object.keys(body)) {
@@ -637,6 +651,10 @@ function checkConfigPatch(body) {
   if ('desktopTools' in body) {
     if (typeof body.desktopTools !== 'boolean') throw new HttpError(400, 'desktopTools must be true or false.');
     out.desktopTools = body.desktopTools;
+  }
+  if ('terminalIdleMinutes' in body) {
+    if (!validIdleMinutes(body.terminalIdleMinutes)) throw new HttpError(400, 'terminalIdleMinutes must be a number of minutes between 0.05 and 1440, or 0 to never close idle terminal sessions.');
+    out.terminalIdleMinutes = body.terminalIdleMinutes;
   }
   for (const k of ['allowShell', 'allowWrite']) {
     if (!(k in body)) continue;
@@ -687,6 +705,9 @@ function normalizeConfig(raw, warnings) {
   } else if (raw.mcpServers !== undefined) warnings.push('mcpServers in companion.json must be an object; no MCP servers were started.');
   if (typeof raw.desktopTools === 'boolean') c.desktopTools = raw.desktopTools;
   else if (raw.desktopTools !== undefined) warnings.push('desktopTools in companion.json must be true or false; using true.');
+  if (validIdleMinutes(raw.terminalIdleMinutes)) c.terminalIdleMinutes = raw.terminalIdleMinutes;
+  else if (raw.terminalIdleMinutes !== undefined)
+    warnings.push(`terminalIdleMinutes in companion.json must be between 0.05 and 1440 minutes, or 0 for never; using ${DEFAULT_CONFIG.terminalIdleMinutes}.`);
   if (isObj(raw.llmUpstreams)) {
     for (const [name, u] of Object.entries(raw.llmUpstreams)) {
       const r = checkUpstream(name, u);
@@ -717,6 +738,7 @@ function serializeConfig(c) {
     allowWrite: c.allowWrite,
     commandTimeoutSec: c.commandTimeoutSec,
     desktopTools: c.desktopTools,
+    terminalIdleMinutes: c.terminalIdleMinutes,
     mcpServers: c.mcpServers,
     llmUpstreams: c.llmUpstreams,
     tunnel: tunnelOut,
@@ -771,6 +793,7 @@ function publicConfig() {
     tunnel: { autostart: t.autostart, kind: t.kind, hasNamedToken: !!t.namedToken, exposeLlm: t.exposeLlm, exposeMcp: t.exposeMcp, namedUrl: t.namedUrl || null },
     llmUpstreams,
     desktopTools: config.desktopTools,
+    terminalIdleMinutes: config.terminalIdleMinutes,
   };
 }
 
@@ -862,8 +885,10 @@ function reloadConfigFromDisk() {
   }
   const prev = config;
   config = next;
+  if (prev.allowShell && !next.allowShell) closeAllTerminals('shell commands were turned off');
   reconcileServers(true);
   applyTunnelSettings(prev.tunnel, next.tunnel);
+  scheduleTerminalIdleCheck();
   event('Reloaded companion.json after it was edited.');
 }
 
@@ -1324,7 +1349,7 @@ async function systemInfoTool() {
   return textResult(lines.join('\n'));
 }
 
-// ---------------------------------------------------------------- desktop tools (Linux, macOS)
+// ---------------------------------------------------------------- desktop tools (Linux, macOS; Windows untested)
 
 // For the tests: AGENT_COMPANION_DESKTOP_PLATFORM makes the desktop tools act as on another platform, and
 // AGENT_COMPANION_DESKTOP_PATH is the only PATH their helper programs are looked up in.
@@ -1333,10 +1358,16 @@ const D_MAC = DESKTOP_PLATFORM === 'darwin';
 const D_WIN = DESKTOP_PLATFORM === 'win32';
 const D_LINUX = !D_MAC && !D_WIN;
 const DESKTOP_TOOLS = ['list_apps', 'launch_app', 'list_windows', 'focus_window', 'close_window', 'desktop_screenshot', 'send_keys', 'type_in_app'];
+const APP_TEXT_TOOLS = ['app_read_text', 'app_write_text'];
 const WINDOW_TOOLS = ['list_windows', 'focus_window', 'close_window'];
 const SHOT_MAX_WIDTH = 1600;
+const WIN_UNTESTED = 'The Windows desktop and application tools are new and have not been tested on Windows yet; they may not work.';
 const apt = (pkgs) => `Debian/Ubuntu: sudo apt install ${pkgs}; Fedora: sudo dnf install ${pkgs}`;
 const HINT = {
+  xClip: `Install xclip or xsel (${apt('xclip')}).`,
+  wlClip: `Install wl-clipboard (${apt('wl-clipboard')}).`,
+  xdgOpen: `Install xdg-utils (${apt('xdg-utils')}).`,
+  winPs: 'Windows PowerShell (powershell.exe) was not found. It is part of Windows: check that C:\\Windows\\System32\\WindowsPowerShell\\v1.0 is on the PATH.',
   noGui:
     'No graphical session was found (DISPLAY and WAYLAND_DISPLAY are not set). If the companion runs as a systemd user service, run "systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XDG_SESSION_TYPE" and restart it.',
   xWindows: `Install wmctrl or xdotool (${apt('wmctrl xdotool')}).`,
@@ -1348,7 +1379,7 @@ const HINT = {
     'Not possible in a Wayland session: GNOME, KDE and most Wayland desktops do not let other programs list, focus or close windows. Choose an "X11" or "Xorg" session at the login screen to use this tool' +
     (xwayland ? ', or install wmctrl to reach the apps that run through XWayland.' : '.'),
   mac: (prog, dir = '/usr/bin') => `${prog} was not found. It is part of macOS: check that ${dir} is on the PATH.`,
-  win: 'Desktop tools are available on Linux and macOS only.',
+  none: 'It is not available on this computer.',
 };
 
 function desktopSession() {
@@ -1375,6 +1406,7 @@ async function desktopInfo() {
   const available = [];
   const missing = {};
   const set = (tool, ok, hint) => (ok ? available.push(tool) : (missing[tool] = hint));
+  const notes = [];
   if (D_MAC) {
     const osa = find('osascript');
     set('list_apps', true);
@@ -1382,6 +1414,10 @@ async function desktopInfo() {
     for (const t of WINDOW_TOOLS) set(t, osa, HINT.mac('osascript'));
     set('desktop_screenshot', find('screencapture'), HINT.mac('screencapture', '/usr/sbin'));
     for (const t of ['send_keys', 'type_in_app']) set(t, osa, HINT.mac('osascript'));
+    const clip = find('pbcopy') && find('pbpaste');
+    for (const t of APP_TEXT_TOOLS) set(t, osa && clip, osa ? HINT.mac('pbcopy or pbpaste') : HINT.mac('osascript'));
+    set('app_open_file', helpers.open, HINT.mac('"open"'));
+    set('run_applescript', osa, HINT.mac('osascript'));
   } else if (D_LINUX) {
     const gui = session !== null;
     const wl = session === 'wayland';
@@ -1395,22 +1431,42 @@ async function desktopInfo() {
     set('desktop_screenshot', gui && shot, !gui ? HINT.noGui : wl ? HINT.wlShot : HINT.xShot);
     const keys = wl ? find('wtype', 'ydotool') : find('xdotool');
     for (const t of ['send_keys', 'type_in_app']) set(t, gui && keys, !gui ? HINT.noGui : wl ? HINT.wlKeys : HINT.xKeys);
-  } else for (const t of DESKTOP_TOOLS) missing[t] = HINT.win;
-  const value = { platform: DESKTOP_PLATFORM, session, available, missing, helpers, PATH, env: withLocale({ ...process.env, PATH }) };
+    const clip = wl ? find('wl-copy') && find('wl-paste') : find('xclip', 'xsel');
+    for (const t of APP_TEXT_TOOLS) set(t, gui && keys && clip, !gui ? HINT.noGui : !keys ? (wl ? HINT.wlKeys : HINT.xKeys) : wl ? HINT.wlClip : HINT.xClip);
+    set('app_open_file', gui && find('xdg-open', 'gio'), !gui ? HINT.noGui : HINT.xdgOpen);
+  } else {
+    const ps = find('powershell', 'pwsh');
+    for (const t of [...DESKTOP_TOOLS, ...APP_TEXT_TOOLS, 'app_open_file', 'run_powershell']) set(t, ps, HINT.winPs);
+    notes.push(WIN_UNTESTED);
+  }
+  const value = { platform: DESKTOP_PLATFORM, session, available, missing, helpers, notes, PATH, env: withLocale({ ...process.env, PATH }) };
   desktopCache = { at: Date.now(), value };
   return value;
 }
 
+// Desktop tools that also need "shell commands": they run code the agent writes.
+const SHELL_GATE_NOTE = 'Turned off: it runs scripts, so it needs "shell commands" (allowShell) to be on.';
+const shellGated = (name) => BUILTIN_BY_NAME.get(name)?.gate === 'shell';
+
 async function desktopStatus() {
   const d = await desktopInfo();
-  return { platform: d.platform, session: d.session, enabled: config.desktopTools, available: [...d.available], missing: { ...d.missing } };
+  const available = d.available.filter((n) => config.allowShell || !shellGated(n));
+  const missing = { ...d.missing };
+  for (const n of d.available) if (!available.includes(n)) missing[n] = SHELL_GATE_NOTE;
+  const s = { platform: d.platform, session: d.session, enabled: config.desktopTools, available, missing };
+  if (d.notes.length) s.notes = [...d.notes];
+  return s;
 }
 
 // Why a desktop tool cannot be used right now, or null.
 async function desktopUnavailable(name) {
   if (!config.desktopTools) return `${name} is turned off in the companion settings (desktopTools is false). The user can turn desktop tools on in the extension: Settings → Computer tools.`;
+  const t = BUILTIN_BY_NAME.get(name);
+  if (t?.platforms && !t.platforms.includes(DESKTOP_PLATFORM)) return `${name} is only available on ${t.platforms.map((p) => ({ darwin: 'macOS', win32: 'Windows' })[p] || p).join(' and ')}.`;
+  if (t?.gate === 'shell' && !config.allowShell)
+    return `${name} is turned off in the companion settings (allowShell is false: it runs scripts). The user can turn shell commands on in the extension: Settings → Computer tools.`;
   const d = await desktopInfo();
-  return d.available.includes(name) ? null : `${name} cannot be used on this computer: ${d.missing[name] || HINT.win}`;
+  return d.available.includes(name) ? null : `${name} cannot be used on this computer: ${d.missing[name] || HINT.none}`;
 }
 
 async function runHelper(d, name, argv, { signal, timeoutMs = 20000, allowFail = false, input } = {}) {
@@ -1422,6 +1478,75 @@ async function runHelper(d, name, argv, { signal, timeoutMs = 20000, allowFail =
   if (r.timedOut) throw new ToolError(`${name} did not finish within ${Math.round(timeoutMs / 1000)} s.`);
   if (r.code !== 0 && !allowFail) throw new ToolError(`${name} failed: ${(r.stderr || r.stdout).trim() || `exit code ${r.code}`}`);
   return r;
+}
+
+// Windows (untested): every desktop action is a small PowerShell script. Values from the model never go into the
+// script text: they arrive as base64 JSON on stdin and are read into $d. The "#aa:<tag>" line names the action.
+const WIN_DATA = "$__in=[Console]::In.ReadToEnd().Trim();$d=$null;if($__in){$d=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($__in))|ConvertFrom-Json};";
+
+async function winRun(d, tag, body, data = {}, { signal, timeoutMs = 30000 } = {}) {
+  const file = d.helpers.powershell || d.helpers.pwsh;
+  if (!file) throw new ToolError(HINT.winPs);
+  const input = Buffer.from(JSON.stringify(data), 'utf8').toString('base64');
+  const r = await runProcess(file, psArgs(`#aa:${tag}\n$ErrorActionPreference='Stop';${WIN_DATA}\n${body}`), { env: d.env, input, timeoutMs, signal, cwd: HOME });
+  if (r.cancelled) throw abortError();
+  if (r.error) throw new ToolError(`Could not run PowerShell: ${r.error.message}`);
+  if (r.timedOut) throw new ToolError(`PowerShell did not finish within ${Math.round(timeoutMs / 1000)} s.`);
+  if (r.code !== 0) throw new ToolError(`PowerShell failed: ${(r.stderr || r.stdout).trim() || `exit code ${r.code}`}`);
+  return r.stdout;
+}
+
+const WIN_LIST_WINDOWS = 'Get-Process | Where-Object { $_.MainWindowTitle } | ForEach-Object { "{0}`t{1}`t{2}" -f $_.Id, $_.ProcessName, $_.MainWindowTitle }';
+const WIN_LIST_APPS = [
+  '$seen=@{}',
+  "foreach($dir in @([Environment]::GetFolderPath('CommonPrograms'),[Environment]::GetFolderPath('Programs'))){if($dir -and (Test-Path -LiteralPath $dir)){Get-ChildItem -LiteralPath $dir -Recurse -Filter *.lnk -ErrorAction SilentlyContinue|ForEach-Object{$k=$_.BaseName.ToLower();if(-not $seen.ContainsKey($k)){$seen[$k]=1;\"lnk`t$($_.BaseName)`t$($_.FullName)\"}}}}",
+  "foreach($root in @('HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths','HKCU:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths')){if(Test-Path $root){Get-ChildItem $root -ErrorAction SilentlyContinue|ForEach-Object{$n=[IO.Path]::GetFileNameWithoutExtension($_.PSChildName);$k=$n.ToLower();if(-not $seen.ContainsKey($k)){$seen[$k]=1;\"exe`t$n`t$($_.GetValue(''))\"}}}}",
+].join('\n');
+// WScript.Shell.AppActivate focuses a window by process id; it may fail when Windows refuses to let a background
+// program take the focus.
+const WIN_FOCUS = "$s=New-Object -ComObject WScript.Shell;if(-not $s.AppActivate([int]$d.pid)){throw 'Windows did not let the companion bring that window to the front.'};Start-Sleep -Milliseconds 300";
+const WIN_SENDKEYS = {
+  Return: '{ENTER}', Tab: '{TAB}', Escape: '{ESC}', BackSpace: '{BACKSPACE}', Delete: '{DELETE}', Insert: '{INSERT}', Home: '{HOME}', End: '{END}',
+  Page_Up: '{PGUP}', Page_Down: '{PGDN}', Up: '{UP}', Down: '{DOWN}', Left: '{LEFT}', Right: '{RIGHT}', Caps_Lock: '{CAPSLOCK}', Print: '{PRTSC}', space: ' ',
+};
+const winKeyChar = (c) => ('+^%~(){}[]'.includes(c) ? `{${c}}` : c);
+const quoteWinArg = (a) => (/[\s"]/.test(a) || !a ? `"${a.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1')}"` : a);
+
+// Key chords in SendKeys notation: ctrl+s → ^s, alt+F4 → %{F4}, Return → {ENTER}.
+function winKeys(chords) {
+  return chords
+    .map((ch) => {
+      if (ch.mods.includes('super')) throw new ToolError(`Windows cannot press the Windows key through SendKeys ("${ch.text}"). Use another shortcut.`);
+      const mods = ch.mods.map((m) => ({ ctrl: '^', shift: '+', alt: '%' })[m]).join('');
+      let k = WIN_SENDKEYS[ch.key] ?? (/^F([1-9]|1[0-6])$/.test(ch.key) ? `{${ch.key}}` : null);
+      if (k === null) {
+        const c = KEYSYM_CHARS[ch.key] ?? ch.key;
+        if ([...c].length !== 1) throw new ToolError(`Cannot send "${ch.text}" on Windows. Use a letter, digit, punctuation, F1–F16 or a named key such as Return, Tab, Escape, Delete, Up.`);
+        k = winKeyChar(mods ? c.toLowerCase() : c);
+      }
+      return mods + k;
+    })
+    .join('');
+}
+
+const winTypeText = (text) => [...text.replace(/\r\n?/g, '\n')].map((c) => (c === '\n' ? '{ENTER}' : c === '\t' ? '{TAB}' : winKeyChar(c))).join('');
+
+async function winWindows(d, signal) {
+  const wins = [];
+  for (const line of (await winRun(d, 'list_windows', WIN_LIST_WINDOWS, {}, { signal })).split(/\r?\n/)) {
+    const f = line.split('\t');
+    if (f.length >= 3 && /^\d+$/.test(f[0])) wins.push({ id: f[0], pid: Number(f[0]), app: f[1], title: f.slice(2).join('\t').trim() });
+  }
+  return { wins, note: '' };
+}
+
+async function winApps(d, signal) {
+  const apps = [];
+  for (const line of (await winRun(d, 'list_apps', WIN_LIST_APPS, {}, { signal, timeoutMs: 60000 })).split(/\r?\n/)) {
+    const f = line.split('\t');
+    if (f.length >= 3 && f[1].trim()) apps.push({ kind: f[0], name: f[1].trim(), path: f.slice(2).join('\t').trim() });
+  }
+  return apps.sort((a, b) => a.name.localeCompare(b.name));
 }
 
 // Starts a GUI program in its own session, detached from the companion. Its stderr goes to a temporary file
@@ -1560,8 +1685,13 @@ async function macApps() {
   return [...apps.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
-async function listAppsTool(args) {
+async function listAppsTool(args, signal) {
   const filter = (optString(args, 'filter') || '').trim().toLowerCase();
+  if (D_WIN) {
+    const apps = (await winApps(await desktopInfo(), signal)).filter((a) => !filter || a.name.toLowerCase().includes(filter));
+    if (!apps.length) return textResult(filter ? `No applications match "${filter}".` : 'No applications were found in the Start menu.');
+    return textResult(`${apps.length} application${apps.length === 1 ? '' : 's'} (start one with launch_app and its name):\n${apps.slice(0, LIST_CAP).map((a) => `${a.name}  (${a.path})`).join('\n')}`);
+  }
   if (D_MAC) {
     const apps = (await macApps()).filter((a) => !filter || a.name.toLowerCase().includes(filter));
     if (!apps.length) return textResult(filter ? `No applications match "${filter}".` : 'No applications were found.');
@@ -1622,23 +1752,27 @@ function stringArray(v, key) {
   return v;
 }
 
-async function launchAppTool(args) {
-  const target = reqString(args, 'name_or_path').trim();
-  const extra = stringArray(args.args, 'args');
-  const d = await desktopInfo();
-  if (D_MAC) {
-    const isPath = /[\\/]/.test(target) || target.startsWith('~');
-    let argv;
-    if (isPath) {
-      const p = resolveUserPath(target);
-      if (!fs.existsSync(p)) throw new ToolError(`Not found: ${p}`);
-      argv = [p];
-    } else argv = ['-a', target.replace(/\.app$/i, '')];
-    if (extra.length) argv.push('--args', ...extra);
-    const r = await spawnDetached(d.helpers.open, argv, d.env, 8000);
-    if (!r.ok) throw new ToolError(`Could not launch ${target}: ${r.message}${/unable to find application/i.test(r.message) ? ' Call list_apps to see the installed applications.' : ''}`);
-    return textResult(`Launched ${target}.`);
+// Windows: a Start menu shortcut or App Paths name from list_apps, else whatever Start-Process can start
+// (a program on the PATH such as "notepad", or a path).
+async function winLaunch(d, target, extra, signal) {
+  let file = target.replace(/^~(?=$|[\\/])/, HOME);
+  if (!/[\\/]/.test(target)) {
+    const q = target.toLowerCase().replace(/\.(lnk|exe)$/, '');
+    const apps = await winApps(d, signal);
+    let app = apps.find((a) => a.name.toLowerCase() === q) || null;
+    if (!app) {
+      const hits = apps.filter((a) => a.name.toLowerCase().includes(q));
+      if (hits.length > 1) throw new ToolError(`"${target}" matches several applications: ${hits.slice(0, 10).map((a) => a.name).join(', ')}. Use the exact name.`);
+      app = hits[0] || null;
+    }
+    if (app) file = app.kind === 'lnk' ? app.path : app.name;
   }
+  await winRun(d, 'launch_app', 'if($d.args.Count){Start-Process -FilePath $d.file -ArgumentList $d.args}else{Start-Process -FilePath $d.file}', { file, args: extra.map(quoteWinArg) }, { signal });
+  return file;
+}
+
+// Linux: by desktop entry name or [id], by .desktop file, by program path, or a program on the PATH.
+async function linuxLaunch(d, target, extra) {
   if (!d.session) throw new ToolError(HINT.noGui);
   let app = null;
   if (/[\\/]/.test(target) || target.startsWith('~')) {
@@ -1655,7 +1789,7 @@ async function launchAppTool(args) {
     } else if (isExecutableFile(p)) {
       const r = await spawnDetached(p, extra, d.env);
       if (!r.ok) throw new ToolError(`Could not launch ${p}: ${r.message}`);
-      return textResult(`Launched ${p}${r.pid ? ` (pid ${r.pid})` : ''}.`);
+      return `Launched ${p}${r.pid ? ` (pid ${r.pid})` : ''}.`;
     } else throw new ToolError(fs.existsSync(p) ? `${p} is not a program or a .desktop file. To open a document, use open_path.` : `Not found: ${p}`);
   } else {
     const apps = await linuxApps();
@@ -1671,13 +1805,13 @@ async function launchAppTool(args) {
       if (!bin) throw new ToolError(`No application called "${target}" was found. Call list_apps to see the installed applications.`);
       const r = await spawnDetached(bin, extra, d.env);
       if (!r.ok) throw new ToolError(`Could not launch ${target}: ${r.message}`);
-      return textResult(`Launched ${target}${r.pid ? ` (pid ${r.pid})` : ''}.`);
+      return `Launched ${target}${r.pid ? ` (pid ${r.pid})` : ''}.`;
     }
   }
   // gtk-launch starts the app the way the desktop does (startup notification, D-Bus activation, …).
   if (d.helpers['gtk-launch'] && !app.outside && !app.terminal) {
     const r = await spawnDetached(d.helpers['gtk-launch'], [app.id.replace(/\.desktop$/, ''), ...extra], d.env, 8000);
-    if (r.ok) return textResult(`Launched ${app.name}.`);
+    if (r.ok) return `Launched ${app.name}.`;
     log('WARN', `gtk-launch ${app.id} failed (${r.message}); starting its Exec line instead.`);
   }
   let argv = expandExec(app.exec, app, extra);
@@ -1691,7 +1825,31 @@ async function launchAppTool(args) {
   if (!bin) throw new ToolError(`Could not launch ${app.name}: its program "${argv[0]}" was not found.`);
   const r = await spawnDetached(bin, argv.slice(1), d.env);
   if (!r.ok) throw new ToolError(`Could not launch ${app.name}: ${r.message}`);
-  return textResult(`Launched ${app.name}${r.pid && !r.exited ? ` (pid ${r.pid})` : ''}.`);
+  return `Launched ${app.name}${r.pid && !r.exited ? ` (pid ${r.pid})` : ''}.`;
+}
+
+async function launchAppTool(args, signal) {
+  const target = reqString(args, 'name_or_path').trim();
+  const extra = stringArray(args.args, 'args');
+  const d = await desktopInfo();
+  if (D_WIN) {
+    const file = await winLaunch(d, target, extra, signal);
+    return textResult(`Launched ${file === target ? target : `${target} (${file})`}.`);
+  }
+  if (D_MAC) {
+    const isPath = /[\\/]/.test(target) || target.startsWith('~');
+    let argv;
+    if (isPath) {
+      const p = resolveUserPath(target);
+      if (!fs.existsSync(p)) throw new ToolError(`Not found: ${p}`);
+      argv = [p];
+    } else argv = ['-a', target.replace(/\.app$/i, '')];
+    if (extra.length) argv.push('--args', ...extra);
+    const r = await spawnDetached(d.helpers.open, argv, d.env, 8000);
+    if (!r.ok) throw new ToolError(`Could not launch ${target}: ${r.message}${/unable to find application/i.test(r.message) ? ' Call list_apps to see the installed applications.' : ''}`);
+    return textResult(`Launched ${target}.`);
+  }
+  return textResult(await linuxLaunch(d, target, extra));
 }
 
 // --- windows
@@ -1792,9 +1950,14 @@ async function linuxWindows(d, signal) {
   return { wins, note };
 }
 
-const listWindows = (d, signal) => (D_MAC ? macWindows(d, signal) : linuxWindows(d, signal));
+const listWindows = (d, signal) => (D_MAC ? macWindows(d, signal) : D_WIN ? winWindows(d, signal) : linuxWindows(d, signal));
 
-const describeWindow = (w) => (D_MAC ? `${w.id}  ${w.app}${w.title ? ` — ${w.title}` : w.index ? '' : ' (no windows)'}${w.front ? '  (front)' : ''}` : `${w.id}  ${w.title || '(no title)'}${w.pid ? `  (pid ${w.pid})` : ''}`);
+const describeWindow = (w) =>
+  D_MAC
+    ? `${w.id}  ${w.app}${w.title ? ` — ${w.title}` : w.index ? '' : ' (no windows)'}${w.front ? '  (front)' : ''}`
+    : D_WIN
+      ? `${w.id}  ${w.app} — ${w.title}`
+      : `${w.id}  ${w.title || '(no title)'}${w.pid ? `  (pid ${w.pid})` : ''}`;
 
 // The id from list_windows, an exact title (or app name on macOS), else the first title containing the text.
 function pickWindow(wins, query) {
@@ -1817,7 +1980,7 @@ async function listWindowsTool(args, signal) {
   const d = await desktopInfo();
   const { wins, note } = await listWindows(d, signal);
   if (!wins.length) return textResult(`No open windows were found.${note}`);
-  return textResult(`${wins.length} window${wins.length === 1 ? '' : 's'} (id, then ${D_MAC ? 'app — title' : 'title'}):\n${wins.map(describeWindow).join('\n')}${note}`);
+  return textResult(`${wins.length} window${wins.length === 1 ? '' : 's'} (id, then ${D_MAC || D_WIN ? 'app — title' : 'title'}):\n${wins.map(describeWindow).join('\n')}${note}`);
 }
 
 async function focusWindow(d, query, signal) {
@@ -1827,7 +1990,8 @@ async function focusWindow(d, query, signal) {
     const lines = ['set p to first process whose name is (item 1 of argv)', 'set frontmost of p to true'];
     if (w.index) lines.push('try', 'perform action "AXRaise" of window ((item 2 of argv) as integer) of p', 'end try');
     await osa(d, lines, [w.app, String(w.index || 0)], { signal });
-  } else if (d.helpers.wmctrl) await runHelper(d, 'wmctrl', ['-i', '-a', w.id], { signal });
+  } else if (D_WIN) await winRun(d, 'focus_window', WIN_FOCUS, { pid: w.pid }, { signal });
+  else if (d.helpers.wmctrl) await runHelper(d, 'wmctrl', ['-i', '-a', w.id], { signal });
   else await runHelper(d, 'xdotool', ['windowactivate', '--sync', String(parseInt(w.id, 16))], { signal });
   return w;
 }
@@ -1845,7 +2009,8 @@ async function closeWindowTool(args, signal) {
   if (D_MAC) {
     if (!w.index) throw new ToolError(`${w.app} has no open windows to close.`);
     await osa(d, ['set p to first process whose name is (item 1 of argv)', 'set w to window ((item 2 of argv) as integer) of p', 'click (first button of w whose subrole is "AXCloseButton")'], [w.app, String(w.index)], { signal });
-  } else if (d.helpers.wmctrl) await runHelper(d, 'wmctrl', ['-i', '-c', w.id], { signal });
+  } else if (D_WIN) await winRun(d, 'close_window', '[void](Get-Process -Id ([int]$d.pid)).CloseMainWindow()', { pid: w.pid }, { signal });
+  else if (d.helpers.wmctrl) await runHelper(d, 'wmctrl', ['-i', '-c', w.id], { signal });
   else await runHelper(d, 'xdotool', ['windowactivate', '--sync', String(parseInt(w.id, 16)), 'key', '--clearmodifiers', 'alt+F4'], { signal });
   return textResult(`Asked ${describeWindow(w)} to close (the app may ask to save first).`);
 }
@@ -2051,6 +2216,19 @@ function shrinkPng(buf, maxWidth = SHOT_MAX_WIDTH) {
   return { data: encodePng(small), width: small.width, height: small.height, srcWidth: img.width, srcHeight: img.height, scaled: true };
 }
 
+// The whole virtual screen (or one display), at the real pixel size on scaled displays.
+const WIN_SCREENSHOT = [
+  "try{Add-Type -Name Dpi -Namespace AA -MemberDefinition '[DllImport(\"user32.dll\")] public static extern bool SetProcessDPIAware();';[void][AA.Dpi]::SetProcessDPIAware()}catch{}",
+  'Add-Type -AssemblyName System.Windows.Forms,System.Drawing',
+  '$b=[System.Windows.Forms.SystemInformation]::VirtualScreen',
+  'if($d.display -gt 0){$all=[System.Windows.Forms.Screen]::AllScreens;if($d.display -gt $all.Count){throw "There is no display $($d.display); this computer has $($all.Count)."};$b=$all[$d.display-1].Bounds}',
+  '$bmp=New-Object System.Drawing.Bitmap $b.Width,$b.Height',
+  '$g=[System.Drawing.Graphics]::FromImage($bmp)',
+  '$g.CopyFromScreen($b.Left,$b.Top,0,0,$bmp.Size)',
+  '$bmp.Save($d.file,[System.Drawing.Imaging.ImageFormat]::Png)',
+  '$g.Dispose();$bmp.Dispose()',
+].join('\n');
+
 async function desktopScreenshotTool(args, signal) {
   const d = await desktopInfo();
   const display = args.display === undefined || args.display === null || args.display === '' ? null : args.display;
@@ -2063,14 +2241,27 @@ async function desktopScreenshotTool(args, signal) {
   if (D_MAC) {
     tool = 'screencapture';
     argv = ['-x', '-t', 'png', ...(display !== null ? ['-D', String(intArg(display, 'display', 1, 1, 32))] : []), file];
-  } else {
+  } else if (D_LINUX) {
     tool = (d.session === 'wayland' ? ['grim', 'gnome-screenshot', 'spectacle'] : ['scrot', 'maim', 'gnome-screenshot', 'spectacle', 'import']).find((n) => d.helpers[n]);
     argv = { grim: [...(display !== null ? ['-o', String(display)] : []), file], 'gnome-screenshot': ['-f', file], spectacle: ['-b', '-n', '-f', '-o', file], scrot: [file], maim: [file], import: ['-window', 'root', file] }[tool];
     if (display !== null && tool !== 'grim') note = ` ("display" is ignored with ${tool}: the whole screen was captured)`;
   }
   try {
-    if (!tool || !d.helpers[tool]) throw new ToolError(d.missing.desktop_screenshot || HINT.win);
-    const r = await runProcess(d.helpers[tool], argv, { env: d.env, timeoutMs: 30000, signal });
+    let r;
+    if (D_WIN) {
+      tool = 'PowerShell';
+      const n = display === null ? 0 : intArg(display, 'display', 1, 1, 32);
+      r = await winRun(d, 'desktop_screenshot', WIN_SCREENSHOT, { file, display: n }, { signal }).then(
+        (stdout) => ({ stdout, stderr: '', code: 0 }),
+        (e) => {
+          if (e.name === 'AbortError') throw e;
+          return { stdout: '', stderr: e.message, code: 1 };
+        },
+      );
+    } else {
+      if (!tool || !d.helpers[tool]) throw new ToolError(d.missing.desktop_screenshot || HINT.none);
+      r = await runProcess(d.helpers[tool], argv, { env: d.env, timeoutMs: 30000, signal });
+    }
     if (r.cancelled) throw abortError();
     let buf = null;
     try {
@@ -2209,38 +2400,1234 @@ async function focusForKeys(d, windowQ, signal) {
   return ` to ${describeWindow(w)}`;
 }
 
-async function sendKeysTool(args, signal) {
-  const chords = parseKeys(reqString(args, 'keys'));
-  const d = await desktopInfo();
-  const target = await focusForKeys(d, optString(args, 'window'), signal);
-  const shown = chords.map((c) => c.text).join(' ');
+// Presses key chords in the window that has the focus, with this platform's helper.
+async function pressKeys(d, chords, signal) {
   if (D_MAC) {
     const { lines, argv } = macKeyLines(chords, 1);
     await osa(d, lines, argv, { signal });
-  } else if (d.session !== 'wayland') await runHelper(d, 'xdotool', ['key', '--clearmodifiers', ...chords.map(xdoChord)], { signal });
+  } else if (D_WIN) await winRun(d, 'send_keys', '$s=New-Object -ComObject WScript.Shell;$s.SendKeys($d.keys)', { keys: winKeys(chords) }, { signal });
+  else if (d.session !== 'wayland') await runHelper(d, 'xdotool', ['key', '--clearmodifiers', ...chords.map(xdoChord)], { signal });
   else if (d.helpers.wtype) await runHelper(d, 'wtype', wtypeArgs(chords), { signal });
   else {
     // ydotool 1.x takes key codes; 0.1.x took names.
     const r = await runHelper(d, 'ydotool', ['key', ...ydoCodes(chords)], { signal, allowFail: true });
     if (r.code !== 0) await runHelper(d, 'ydotool', ['key', ...chords.map(xdoChord)], { signal });
   }
-  return textResult(`Sent ${shown}${target}.`);
+}
+
+async function sendKeysTool(args, signal) {
+  const chords = parseKeys(reqString(args, 'keys'));
+  const d = await desktopInfo();
+  const target = await focusForKeys(d, optString(args, 'window'), signal);
+  await pressKeys(d, chords, signal);
+  return textResult(`Sent ${chords.map((c) => c.text).join(' ')}${target}.`);
 }
 
 async function typeInAppTool(args, signal) {
   if (typeof args.text !== 'string' || !args.text) throw new ToolError('Invalid arguments: "text" is required and must be a non-empty string.');
   const text = args.text;
-  if (text.length > 20000) throw new ToolError('Invalid arguments: "text" is longer than 20,000 characters. Type it in parts, or write it to a file instead.');
+  if (text.length > 20000) throw new ToolError('Invalid arguments: "text" is longer than 20,000 characters. Type it in parts, use app_write_text, or write it to a file instead.');
   const d = await desktopInfo();
   const target = await focusForKeys(d, optString(args, 'window'), signal);
   const timeoutMs = 30000 + text.length * 40;
   const dash = text.startsWith('-') ? ['--'] : [];
   if (D_MAC) await osa(d, ['keystroke (item 1 of argv)'], [text], { signal, timeoutMs });
+  else if (D_WIN) await winRun(d, 'type_in_app', '$s=New-Object -ComObject WScript.Shell;$s.SendKeys($d.keys)', { keys: winTypeText(text) }, { signal, timeoutMs });
   else if (d.session !== 'wayland') await runHelper(d, 'xdotool', ['type', '--delay', '20', '--clearmodifiers', '--', text], { signal, timeoutMs });
   else if (d.helpers.wtype) await runHelper(d, 'wtype', [...dash, text], { signal, timeoutMs });
   else await runHelper(d, 'ydotool', ['type', ...dash, text], { signal, timeoutMs });
   return textResult(`Typed ${text.length.toLocaleString('en-US')} characters${target}.`);
 }
+
+// --- reading and writing an application's text through the clipboard
+
+const primaryMod = () => (D_MAC ? 'cmd' : 'ctrl');
+const clipSentinel = () => `agent-companion-clipboard-check-${crypto.randomBytes(8).toString('hex')}`;
+
+// The clipboard programs on the desktop PATH (macOS pbcopy/pbpaste, Linux wl-clipboard, xclip or xsel).
+function clipHelpers(d) {
+  const env = D_MAC ? { ...d.env, LANG: 'en_US.UTF-8' } : d.env;
+  if (D_MAC) return { env, read: [d.helpers.pbpaste, []], write: [d.helpers.pbcopy, []] };
+  if (d.session === 'wayland') return { env, read: [d.helpers['wl-paste'], ['--no-newline']], write: [d.helpers['wl-copy'], []] };
+  if (d.helpers.xclip) return { env, read: [d.helpers.xclip, ['-selection', 'clipboard', '-o']], write: [d.helpers.xclip, ['-selection', 'clipboard', '-i']] };
+  return { env, read: [d.helpers.xsel, ['--clipboard', '--output']], write: [d.helpers.xsel, ['--clipboard', '--input']] };
+}
+
+async function clipGet(c, signal) {
+  const r = await runProcess(c.read[0], c.read[1], { env: c.env, timeoutMs: 15000, signal, maxChars: 1e9 });
+  if (r.cancelled) throw abortError();
+  if (r.error || r.timedOut) throw new ToolError(`Could not read the clipboard: ${r.error?.message || 'the clipboard program did not answer'}`);
+  // An empty clipboard: wl-paste says "No selection", xclip "target … not available".
+  if (r.code !== 0) {
+    if (/no selection|nothing is copied|not available/i.test(r.stderr)) return '';
+    throw new ToolError(`Could not read the clipboard: ${r.stderr.trim() || `exit code ${r.code}`}`);
+  }
+  return r.stdout;
+}
+
+async function clipSet(c, text) {
+  const r = await runProcess(c.write[0], c.write[1], { env: c.env, input: text, timeoutMs: 15000 });
+  if (r.error || r.timedOut || r.code !== 0) throw new ToolError(`Could not write the clipboard: ${(r.stderr || r.error?.message || 'the clipboard program did not answer').trim()}`);
+}
+
+const nothingCopied = (where) =>
+  `Nothing was copied${where}: Select All + Copy did not put any text on the clipboard (the user's clipboard was put back). ` +
+  `The window may not show a document or text field with the keyboard focus, or the app copies something other than text. ` +
+  `Look with desktop_screenshot, click into the text with the user's help, or use ${D_MAC ? 'run_applescript' : D_WIN ? 'run_powershell' : 'a file-based route (read_file)'} for apps that can be scripted.`;
+
+function appTextResult(text, where) {
+  if (!text) return textResult(`The text${where} is empty.`);
+  const n = text.length.toLocaleString('en-US');
+  return textResult(`Read ${n} characters${where} (Select All + Copy; the user's clipboard was put back):\n${capText(text, 100000)}`);
+}
+
+async function pickWinWindow(d, windowQ, signal) {
+  if (!windowQ) return null;
+  return pickWindow((await winWindows(d, signal)).wins, windowQ);
+}
+
+const WIN_CLIP_SAVE = "Add-Type -AssemblyName System.Windows.Forms;$s=New-Object -ComObject WScript.Shell;$saved=$null;try{$saved=Get-Clipboard -Raw}catch{}";
+const WIN_CLIP_RESTORE = "if([string]::IsNullOrEmpty($saved)){try{[System.Windows.Forms.Clipboard]::Clear()}catch{}}else{Set-Clipboard -Value $saved}";
+const WIN_FOCUS_PID = "if($d.pid){if(-not $s.AppActivate([int]$d.pid)){throw 'Windows did not let the companion bring that window to the front.'};Start-Sleep -Milliseconds 300}";
+const WIN_READ_TEXT = [
+  WIN_CLIP_SAVE,
+  '$t=$d.sentinel',
+  'try{',
+  'Set-Clipboard -Value $d.sentinel',
+  WIN_FOCUS_PID,
+  "$s.SendKeys('^a');Start-Sleep -Milliseconds 100;$s.SendKeys('^c')",
+  'for($i=0;$i -lt 12;$i++){Start-Sleep -Milliseconds 150;$t=Get-Clipboard -Raw;if($t -ne $d.sentinel){break}}',
+  "if(-not $d.keep){$s.SendKeys('{RIGHT}')}",
+  `}finally{${WIN_CLIP_RESTORE}}`,
+  "if($t -eq $d.sentinel){'#nothing'}else{'#text:'+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$t))}",
+].join('\n');
+const WIN_WRITE_TEXT = [
+  WIN_CLIP_SAVE,
+  'try{',
+  'Set-Clipboard -Value $d.text',
+  WIN_FOCUS_PID,
+  '$s.SendKeys($d.keys)',
+  'Start-Sleep -Milliseconds ([int]$d.wait)',
+  `}finally{${WIN_CLIP_RESTORE}}`,
+  "'#ok'",
+].join('\n');
+
+async function appReadTextTool(args, signal) {
+  const d = await desktopInfo();
+  const windowQ = optString(args, 'window');
+  const keep = args.keep_selection === true;
+  if (D_WIN) {
+    const w = await pickWinWindow(d, windowQ, signal);
+    const where = w ? ` from ${describeWindow(w)}` : '';
+    const out = await winRun(d, 'app_read_text', WIN_READ_TEXT, { pid: w?.pid || 0, sentinel: clipSentinel(), keep }, { signal, timeoutMs: 40000 });
+    const m = /#text:([A-Za-z0-9+/=]*)/.exec(out);
+    if (!m) throw new ToolError(nothingCopied(where));
+    return appTextResult(Buffer.from(m[1], 'base64').toString('utf8'), where);
+  }
+  const c = clipHelpers(d);
+  const saved = await clipGet(c, signal);
+  const sentinel = clipSentinel();
+  const mod = primaryMod();
+  let text = null;
+  let where = '';
+  try {
+    // A marker on the clipboard first, so a Copy that did nothing is not mistaken for the document's text.
+    await clipSet(c, sentinel);
+    where = (await focusForKeys(d, windowQ, signal)).replace(/^ to /, ' from ');
+    await pressKeys(d, parseKeys(`${mod}+a ${mod}+c`), signal);
+    for (let i = 0; i < 12 && text === null; i++) {
+      await sleep(i ? 150 : 200);
+      const v = await clipGet(c, signal);
+      if (v !== sentinel) text = v;
+    }
+    // Collapse the selection, so that typing next does not replace the whole text.
+    if (!keep) await pressKeys(d, parseKeys('Right'), signal);
+  } finally {
+    await clipSet(c, saved).catch((e) => warn(`app_read_text could not put the clipboard back: ${e.message}`));
+  }
+  if (text === null) throw new ToolError(nothingCopied(where));
+  return appTextResult(text, where);
+}
+
+async function appWriteTextTool(args, signal) {
+  if (typeof args.text !== 'string') throw new ToolError('Invalid arguments: "text" is required and must be a string.');
+  if (args.text.length > 2000000) throw new ToolError('Invalid arguments: "text" is longer than 2,000,000 characters. Write it to a file with write_file and open that instead.');
+  const mode = args.mode === undefined || args.mode === null || args.mode === '' ? 'replace' : String(args.mode).toLowerCase();
+  if (!['replace', 'append', 'insert'].includes(mode)) throw new ToolError('Invalid arguments: "mode" must be "replace", "append" or "insert".');
+  const d = await desktopInfo();
+  const windowQ = optString(args, 'window');
+  const mod = primaryMod();
+  const keys = mode === 'replace' ? `${mod}+a ${mod}+v` : mode === 'append' ? (D_MAC ? 'cmd+Down cmd+v' : 'ctrl+End ctrl+v') : `${mod}+v`;
+  // The app reads the clipboard while it handles the paste: give it time before the clipboard is put back.
+  const wait = 400 + Math.min(1600, Math.round(args.text.length / 50));
+  const n = args.text.length.toLocaleString('en-US');
+  const done = (where) =>
+    textResult(
+      `${{ replace: 'Replaced all the text', append: `Appended ${n} characters`, insert: `Inserted ${n} characters` }[mode]}${where} by pasting${mode === 'replace' ? ` ${n} characters` : ''} ` +
+        `(keys: ${keys}; the user's clipboard was put back). Check the result with app_read_text or desktop_screenshot; save with send_keys "${mod}+s".`,
+    );
+  if (D_WIN) {
+    const w = await pickWinWindow(d, windowQ, signal);
+    await winRun(d, 'app_write_text', WIN_WRITE_TEXT, { pid: w?.pid || 0, text: args.text, keys: winKeys(parseKeys(keys)), wait }, { signal, timeoutMs: 40000 });
+    return done(w ? ` in ${describeWindow(w)}` : '');
+  }
+  const c = clipHelpers(d);
+  const saved = await clipGet(c, signal);
+  let where = '';
+  try {
+    await clipSet(c, args.text);
+    where = (await focusForKeys(d, windowQ, signal)).replace(/^ to /, ' in ');
+    await pressKeys(d, parseKeys(keys), signal);
+    await sleep(wait);
+  } finally {
+    await clipSet(c, saved).catch((e) => warn(`app_write_text could not put the clipboard back: ${e.message}`));
+  }
+  return done(where);
+}
+
+// --- opening a file in an application
+
+const WIN_OPEN_FILE = [
+  "if($d.app){Start-Process -FilePath $d.app -ArgumentList ('\"'+$d.path+'\"')}else{Start-Process -FilePath $d.path}",
+  '$w=$null',
+  'for($i=0;$i -lt 8 -and -not $w;$i++){Start-Sleep -Milliseconds 500;$w=Get-Process|Where-Object{$_.MainWindowTitle -and ($_.MainWindowTitle.IndexOf($d.base,[StringComparison]::OrdinalIgnoreCase) -ge 0 -or $_.MainWindowTitle.IndexOf($d.stem,[StringComparison]::OrdinalIgnoreCase) -ge 0)}|Select-Object -First 1}',
+  'if($w){"{0}`t{1}`t{2}" -f $w.Id,$w.ProcessName,$w.MainWindowTitle}',
+].join('\n');
+
+// The frontmost app and the title of its front window (macOS), or null.
+async function macFrontWindow(d, signal) {
+  try {
+    const out = await osa(d, ['-- aa:front_window', 'set p to first process whose frontmost is true', 'set t to ""', 'try', 'set t to name of front window of p', 'end try', 'return (name of p) & tab & t'], [], { signal, timeoutMs: 8000 });
+    const [app, ...rest] = out.replace(/\r?\n$/, '').split('\t');
+    const title = rest.join('\t');
+    return app ? { app, title: title === 'missing value' ? '' : title } : null;
+  } catch (e) {
+    if (e.name === 'AbortError') throw e;
+    return null;
+  }
+}
+
+async function appOpenFileTool(args, signal) {
+  const p = resolveUserPath(reqString(args, 'path'));
+  if (!fs.existsSync(p)) throw new ToolError(`Not found: ${p}`);
+  const app = (optString(args, 'app') || '').trim();
+  const d = await desktopInfo();
+  const base = path.basename(p);
+  const stem = base.replace(/\.[^.]+$/, '');
+  const shows = (title) => {
+    const t = String(title || '').toLowerCase();
+    return t.includes(base.toLowerCase()) || (stem.length > 1 && t.includes(stem.toLowerCase()));
+  };
+  let win = null;
+  if (D_WIN) {
+    const out = await winRun(d, 'app_open_file', WIN_OPEN_FILE, { path: p, app, base, stem }, { signal, timeoutMs: 45000 });
+    const f = out.trim().split(/\r?\n/).pop()?.split('\t') || [];
+    if (f.length >= 3 && /^\d+$/.test(f[0])) win = { id: f[0], pid: Number(f[0]), app: f[1], title: f.slice(2).join('\t') };
+  } else if (D_MAC) {
+    const r = await spawnDetached(d.helpers.open, app ? ['-a', app.replace(/\.app$/i, ''), p] : [p], d.env, 8000);
+    if (!r.ok) throw new ToolError(`Could not open ${p}${app ? ` in ${app}` : ''}: ${r.message}${/unable to find application/i.test(r.message) ? ' Call list_apps to see the installed applications.' : ''}`);
+    // Apps take a moment to show the document; System Events then names the front window.
+    for (let i = 0; i < 4 && !win && d.helpers.osascript; i++) {
+      await sleep(700);
+      const fw = await macFrontWindow(d, signal);
+      if (fw && (shows(fw.title) || i === 3)) win = { id: fw.app, app: fw.app, title: fw.title, index: fw.title ? 1 : 0 };
+    }
+  } else {
+    if (app) await linuxLaunch(d, app, [p]);
+    else {
+      const [file, argv] = d.helpers['xdg-open'] ? [d.helpers['xdg-open'], [p]] : [d.helpers.gio, ['open', p]];
+      const r = await spawnDetached(file, argv, d.env, 8000);
+      if (!r.ok) throw new ToolError(`Could not open ${p}: ${r.message}`);
+    }
+    for (let i = 0; i < 4 && !win && d.available.includes('list_windows'); i++) {
+      await sleep(700);
+      try {
+        win = (await linuxWindows(d, signal)).wins.find((w) => shows(w.title)) || null;
+      } catch {}
+    }
+  }
+  const head = `Opened ${p}${app ? ` in ${app}` : ' in its default application'}.`;
+  if (!win) return textResult(`${head} Its window was not found (yet); call list_windows to see it.`);
+  const name = win.title || win.app;
+  return textResult(`${head} Window: ${D_MAC ? `${win.app}${win.title ? ` — ${win.title}` : ''}` : describeWindow(win)}. Use "${name}" as "window" for app_read_text, app_write_text, send_keys or type_in_app.`);
+}
+
+// --- scripting applications: AppleScript (macOS) and PowerShell (Windows)
+
+function appleScriptError(stderr) {
+  const s = String(stderr || '').trim();
+  if (/-1743|not authori[sz]ed to send apple events/i.test(s))
+    return `${s}\nmacOS blocked this. Allow it in System Settings → Privacy & Security → Automation: let your terminal app (or "node" when the companion starts at login) control that application, then try again.`;
+  if (/-600\b|isn.t running/i.test(s)) return `${s}\nThe application is not running: start it first (e.g. tell application "TextEdit" to activate, or launch_app).`;
+  if (/-1728\b|can.t get/i.test(s)) return `${s}\nThat object does not exist; for example no document or workbook is open. Make one first or check the names with a smaller script.`;
+  return macOsaError(s);
+}
+
+async function runAppleScriptTool(args, signal) {
+  const script = reqString(args, 'script');
+  const raw = args.language === undefined || args.language === null || args.language === '' ? 'AppleScript' : String(args.language);
+  const language = /^(applescript)$/i.test(raw) ? 'AppleScript' : /^(javascript|jxa|js)$/i.test(raw) ? 'JavaScript' : null;
+  if (!language) throw new ToolError('Invalid arguments: "language" must be "AppleScript" or "JavaScript".');
+  const timeoutSec = intArg(args.timeout_sec, 'timeout_sec', 60, 1, 600);
+  const d = await desktopInfo();
+  const r = await runProcess(d.helpers.osascript, ['-l', language], { env: d.env, input: script, timeoutMs: timeoutSec * 1000, signal, cwd: HOME });
+  if (r.cancelled) throw abortError();
+  if (r.error) throw new ToolError(`Could not run osascript: ${r.error.message}`);
+  const out = r.stdout.replace(/\n$/, '');
+  const log2 = r.stderr.trim();
+  if (r.timedOut)
+    return toolError(
+      `The script did not finish within ${timeoutSec} s and was stopped. If it controls an application for the first time, macOS may be asking the user whether to allow that (Automation permission): ask them to click OK, then run it again.` +
+        (out ? `\n--- output so far ---\n${out}` : ''),
+    );
+  if (r.code !== 0) return toolError(`${language} error: ${appleScriptError(log2)}`);
+  return textResult(`${out ? `Result: ${out}` : 'Done (the script returned no result).'}${log2 ? `\n--- log ---\n${log2}` : ''}`);
+}
+
+async function runPowerShellTool(args, signal) {
+  const script = reqString(args, 'script');
+  const timeoutSec = intArg(args.timeout_sec, 'timeout_sec', 60, 1, 600);
+  const d = await desktopInfo();
+  const file = d.helpers.powershell || d.helpers.pwsh;
+  // The script arrives on stdin and runs as one script block (so multi-line statements work as in a .ps1 file).
+  const boot = "#aa:run_powershell\n[Console]::InputEncoding=[Text.Encoding]::UTF8;$__aa_s=[Console]::In.ReadToEnd();. ([scriptblock]::Create($__aa_s))";
+  const r = await runProcess(file, psArgs(boot), { env: d.env, input: script, timeoutMs: timeoutSec * 1000, signal, cwd: HOME });
+  if (r.cancelled) throw abortError();
+  if (r.error) throw new ToolError(`Could not run PowerShell: ${r.error.message}`);
+  const lines = [r.timedOut ? `Timed out after ${timeoutSec} s; PowerShell was stopped.` : `Exit code: ${r.code}`];
+  const stdout = stripAnsi(r.stdout).replace(/\r?\n$/, '');
+  const stderr = stripAnsi(r.stderr).replace(/\r?\n$/, '');
+  if (stdout) lines.push('--- output ---', stdout);
+  if (stderr) lines.push('--- errors ---', stderr);
+  if (!stdout && !stderr) lines.push('(no output)');
+  return r.timedOut || r.code !== 0 ? toolError(lines.join('\n')) : textResult(lines.join('\n'));
+}
+
+const pathProp = (what) => ({ type: 'string', description: `${what} ~ and relative paths are resolved against the user's home folder.` });
+
+// ---------------------------------------------------------------- terminal sessions
+
+// Persistent interactive shells the agent works in step by step: send a command, read what it printed, send the next.
+// On macOS and Linux each session runs on a real pseudo-terminal obtained without native code: the shell runs under
+// `script` (BSD or util-linux), else under Python's pty module, else on plain pipes (no terminal). On Windows it is
+// PowerShell on plain pipes (a ConPTY needs native code). What the terminal prints is turned into plain text.
+const TERM_MAX = 8;
+const TERM_SCROLLBACK = 256 * 1024;
+const TERM_COLS = 200;
+const TERM_ROWS = 50;
+const TERM_START_MS = 10000;
+const TERM_READY_MS = 15000;
+const terminals = new Map();
+let terminalSeq = 0;
+let terminalIdleTimer = null;
+
+// Invisible markers (OSC escape sequences) printed by the session's own start-up code: the shell's pid, and at every
+// prompt the last exit status and the current folder; the launcher adds the exit status of the session itself.
+const TERM_MARK_RE = /\x1b\](?:133;D(?:;(-?\d*))?|1337;AA(Pid|Cwd|Exit)=([^\x07\x1b]*))\x07/g;
+
+const shQuote = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+const tildePath = (p) => (p && (p === HOME || p.startsWith(HOME + path.sep)) ? `~${p.slice(HOME.length)}` : p);
+const fmtWait = (ms) => (ms % 1000 ? `${(ms / 1000).toFixed(ms < 1000 ? 1 : 2).replace(/0$/, '')} s` : `${ms / 1000} s`);
+
+// Runs on the terminal: sets its size, reports the shell's pid ("exec" keeps it), then becomes the shell.
+const TERM_WRAPPER =
+  `stty cols ${TERM_COLS} rows ${TERM_ROWS} 2>/dev/null; SHELL=$__AA_SHELL; export SHELL; unset __AA_SHELL; ` +
+  `printf '\\033]1337;AAPid=%s\\007' "$$"; exec "$0" "$@"`;
+
+// Feeds the pty helper through a real pipe (macOS `script` refuses the socket Node gives a child as stdin, and FIFOs
+// are sockets there too) and makes sure nothing outlives the other side: when the companion's end closes, or the
+// helper ends, the whole group is hung up.
+const TERM_LAUNCHER = `{ cat; kill -HUP 0; } | { "$@"; s=$?; printf '\\033]1337;AAExit=%s\\007' "$s"; kill -HUP 0; }`;
+
+// Windows (untested): PowerShell reads commands from stdin; after each one a marker line reports status and folder.
+const WIN_TERM_INIT =
+  "$ProgressPreference='SilentlyContinue';[Console]::OutputEncoding=[Text.Encoding]::UTF8;try{[Console]::InputEncoding=[Text.Encoding]::UTF8}catch{};" +
+  "[Console]::Out.Write([char]27+']1337;AAPid='+$PID+[char]7)\n";
+const WIN_TERM_MARK =
+  "$__aa=$?;[Console]::Out.Write([char]27+']133;D;'+$(if($__aa){0}elseif($LASTEXITCODE){$LASTEXITCODE}else{1})+[char]7+[char]27+']1337;AACwd='+(Get-Location).Path+[char]7)\n";
+
+// Start-up files for zsh and bash sessions: they load the user's own files first, then add the prompt marker.
+const RC_HEAD = '# Written by the Agent Automation companion for its terminal sessions; rewritten when a session starts.\n';
+const zshChain = (file) =>
+  `${RC_HEAD}ZDOTDIR=$__AA_USER_ZDOTDIR\n[[ -r $ZDOTDIR/${file} ]] && builtin source $ZDOTDIR/${file}\n__AA_USER_ZDOTDIR=$ZDOTDIR\nZDOTDIR=$__aa_dir\n`;
+
+function terminalRcFiles(dir) {
+  return {
+    'zsh/.zshenv': `${RC_HEAD}# zsh reads its start-up files from this folder; each one loads yours first.\n__aa_dir=$ZDOTDIR\n${zshChain('.zshenv').slice(RC_HEAD.length)}`,
+    'zsh/.zprofile': zshChain('.zprofile'),
+    'zsh/.zshrc': [
+      zshChain('.zshrc').trimEnd(),
+      '# After your settings: comments allowed, no "!" history expansion, no "%" end-of-line mark, a history of its own,',
+      '# and an invisible marker before each prompt that tells the companion a command has finished.',
+      'setopt interactive_comments no_bang_hist',
+      'unsetopt prompt_sp',
+      'HISTFILE=$__aa_dir/.zsh_history',
+      "__aa_precmd() { builtin printf '\\033]133;D;%s\\007\\033]1337;AACwd=%s\\007' \"$?\" \"$PWD\"; }",
+      'precmd_functions=(__aa_precmd ${precmd_functions[@]:#__aa_precmd})',
+      '',
+    ].join('\n'),
+    'zsh/.zlogin': `${zshChain('.zlogin').replace(/__AA_USER_ZDOTDIR=\$ZDOTDIR\nZDOTDIR=\$__aa_dir\n$/, '')}[[ -z $__AA_HAD_ZDOTDIR && $ZDOTDIR == "$HOME" ]] && unset ZDOTDIR\nunset __aa_dir __AA_USER_ZDOTDIR __AA_HAD_ZDOTDIR\n`,
+    bashrc: [
+      RC_HEAD.trimEnd(),
+      '# Loads your start-up files the way a login shell does, then adds an invisible marker before each prompt that tells',
+      '# the companion a command has finished.',
+      '[ -r /etc/profile ] && . /etc/profile',
+      'for __aa_f in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do',
+      '  if [ -r "$__aa_f" ]; then . "$__aa_f"; break; fi',
+      'done',
+      'unset __aa_f',
+      'set +H',
+      `HISTFILE=${shQuote(path.join(dir, '.bash_history'))}`,
+      "__aa_prompt() { local s=$?; builtin printf '\\033]133;D;%s\\007\\033]1337;AACwd=%s\\007' \"$s\" \"$PWD\"; return $s; }",
+      'case ";${PROMPT_COMMAND-};" in *";__aa_prompt;"*) ;; *) PROMPT_COMMAND="__aa_prompt${PROMPT_COMMAND:+;$PROMPT_COMMAND}" ;; esac',
+      '',
+    ].join('\n'),
+  };
+}
+
+function terminalRcDir() {
+  const dir = path.join(homeDir || defaultHome(), 'terminal');
+  fs.mkdirSync(path.join(dir, 'zsh'), { recursive: true, mode: 0o700 });
+  for (const [rel, text] of Object.entries(terminalRcFiles(dir))) {
+    const f = path.join(dir, rel);
+    let cur = null;
+    try {
+      cur = fs.readFileSync(f, 'utf8');
+    } catch {}
+    if (cur !== text) writeFileAtomic(f, text);
+  }
+  return dir;
+}
+
+// Plain text from what a terminal printed: escape sequences are dropped, and carriage returns, backspaces, cursor moves
+// and "erase line" are applied as a terminal would, so redrawn lines (progress bars, line editors) keep only their final
+// state. The prompt marker starts a new line when the output before it did not end with one.
+function renderTerm(raw) {
+  const rows = [[]];
+  let row = 0;
+  let col = 0;
+  const put = (ch) => {
+    const r = rows[row];
+    while (r.length < col) r.push(' ');
+    r[col++] = ch;
+  };
+  const lineDown = (keepCol = false) => {
+    row++;
+    if (row >= rows.length) rows.push([]);
+    if (!keepCol) col = 0;
+  };
+  const n = raw.length;
+  for (let i = 0; i < n; i++) {
+    const code = raw.charCodeAt(i);
+    if (code === 0x1b) {
+      const k = raw[i + 1];
+      if (k === undefined) break;
+      if (k === '[') {
+        let j = i + 2;
+        while (j < n && raw.charCodeAt(j) >= 0x30 && raw.charCodeAt(j) <= 0x3f) j++;
+        const params = raw.slice(i + 2, j);
+        while (j < n && raw.charCodeAt(j) >= 0x20 && raw.charCodeAt(j) <= 0x2f) j++;
+        if (j >= n) break;
+        const f = raw[j];
+        const num = Math.max(1, parseInt(params, 10) || 1);
+        const r = rows[row];
+        if (/^[\d;]*$/.test(params)) {
+          if (f === 'K') {
+            if (!params || params === '0') r.length = Math.min(r.length, col);
+            else if (params === '1') for (let x = 0; x <= col && x < r.length; x++) r[x] = ' ';
+            else if (params === '2') r.length = 0;
+          } else if (f === 'D') col = Math.max(0, col - num);
+          else if (f === 'C') col += num;
+          else if (f === 'G') col = num - 1;
+          else if (f === 'A') row = Math.max(0, row - num);
+          else if (f === 'B') for (let x = 0; x < num; x++) lineDown(true);
+          else if (f === 'P') r.splice(col, num);
+          else if (f === 'X') for (let x = col; x < col + num && x < r.length; x++) r[x] = ' ';
+          else if (f === '@' && col < r.length) r.splice(col, 0, ...Array(num).fill(' '));
+        }
+        i = j;
+        continue;
+      }
+      if (k === ']' || k === 'P' || k === '_' || k === '^' || k === 'X') {
+        let j = i + 2;
+        while (j < n && raw.charCodeAt(j) !== 7 && !(raw.charCodeAt(j) === 0x1b && raw[j + 1] === '\\')) j++;
+        if (j >= n) break;
+        if (k === ']' && raw.startsWith('133;D', i + 2) && rows[row].some((ch) => ch !== ' ')) lineDown();
+        i = raw.charCodeAt(j) === 7 ? j : j + 1;
+        continue;
+      }
+      i += '()*+#%'.includes(k) ? 2 : 1;
+      continue;
+    }
+    if (code === 10) lineDown();
+    else if (code === 13) col = 0;
+    else if (code === 8) col = Math.max(0, col - 1);
+    else if (code === 9) col = (Math.floor(col / 8) + 1) * 8;
+    else if (code < 0x20 || code === 0x7f || (code >= 0x80 && code < 0xa0)) continue;
+    else if (code >= 0xd800 && code <= 0xdbff && i + 1 < n) put(raw[i] + raw[++i]);
+    else put(raw[i]);
+  }
+  return rows
+    .map((r, idx) => {
+      let end = r.length;
+      while (end > 0 && r[end - 1] === ' ') end--;
+      // On the line being typed on, keep spaces up to the cursor: prompts such as ">>> " end with one.
+      if (idx === rows.length - 1 && idx === row) end = Math.max(end, Math.min(col, r.length));
+      return r.slice(0, end).join('');
+    })
+    .join('\n');
+}
+
+// Where a trailing escape sequence that is not complete yet starts (kept for the next read), else s.length.
+function completeEnd(s) {
+  const i = s.lastIndexOf('\x1b');
+  if (i < 0 || s.length - i > 4096) return s.length;
+  const k = s[i + 1];
+  if (k === undefined) return i;
+  if (k === '[') return /^\x1b\[[0-?]*[ -/]*[@-~]/.test(s.slice(i)) ? s.length : i;
+  if (']P_^X'.includes(k)) return /\x07|\x1b\\/.test(s.slice(i + 2)) ? s.length : i;
+  if ('()*+#%'.includes(k)) return s.length - i >= 3 ? s.length : i;
+  return s.length;
+}
+
+// The terminal echoes what was typed: drop that first line (or a partly echoed one) from the output.
+function stripEcho(text, input) {
+  const first = String(input).split(/\r\n|\r|\n/)[0].replace(/\s+$/, '');
+  if (/[\x00-\x08\x0b-\x1f\x7f]/.test(first)) return text;
+  if (!first) return text.startsWith('\n') ? text.slice(1) : text;
+  if (text === first || (!text.includes('\n') && first.startsWith(text))) return '';
+  if (text.startsWith(`${first}\n`)) return text.slice(first.length + 1);
+  // A line wider than the terminal comes back scrolled sideways (zsh, bash): "<" and the end of what was typed.
+  const nl = text.indexOf('\n');
+  const line = (nl < 0 ? text : text.slice(0, nl)).replace(/\s+$/, '');
+  if (line.length > 1 && line[0] === '<' && first.endsWith(line.slice(1))) return nl < 0 ? '' : text.slice(nl + 1);
+  return text;
+}
+
+// "text" (case-insensitive) or "/regular expression/flags".
+function parseWaitFor(s) {
+  if (s === undefined || s === '') return null;
+  const m = /^\/(.+)\/([a-z]*)$/s.exec(s);
+  if (m) {
+    let re;
+    try {
+      re = new RegExp(m[1], m[2].replace(/[gy]/g, ''));
+    } catch (e) {
+      throw new ToolError(`Invalid arguments: wait_for is not a valid regular expression: ${e.message}`);
+    }
+    // Only the end of the output is searched, so a slow expression cannot hold up the companion.
+    return { label: s, test: (t) => re.test(t.length > 32768 ? t.slice(-32768) : t) };
+  }
+  const low = s.toLowerCase();
+  return { label: JSON.stringify(s), test: (t) => t.toLowerCase().includes(low) };
+}
+
+const TERM_POSIX = new Set(['sh', 'dash', 'ksh', 'mksh', 'ash', 'yash', 'posh']);
+
+// The program a session runs: the user's shell (a POSIX one, like run_command), or the "shell" argument.
+async function resolveTerminalShell(spec) {
+  const PATH = await loginPath;
+  const s = (spec || '').trim();
+  if (IS_WIN) {
+    const words = s ? s.split(/\s+/) : ['powershell'];
+    const file = which(words[0], PATH) || (path.isAbsolute(words[0]) ? words[0] : null);
+    if (!file) throw new ToolError(`Not found: "${words[0]}". Give a program on the PATH, e.g. "powershell", "pwsh" or "cmd".`);
+    const name = path.basename(file).replace(/\.exe$/i, '');
+    if (/^(powershell|pwsh)$/i.test(name) && words.length === 1)
+      return { file, name, kind: 'powershell', args: ['-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', '-'], label: /pwsh/i.test(name) ? 'PowerShell 7' : 'Windows PowerShell' };
+    return { file, name, kind: 'other', args: words.slice(1), label: name };
+  }
+  let file;
+  let args = null;
+  if (!s) file = userShell().path;
+  else if (/[\\/]/.test(s) && isExecutableFile(resolveUserPath(s))) file = resolveUserPath(s);
+  else {
+    const words = s.split(/\s+/);
+    file = which(words[0], PATH, HOME);
+    if (!file) throw new ToolError(`Not found: "${words[0]}". Give a shell or program on the PATH (e.g. "bash", "zsh", "python3") or its full path.`);
+    if (words.length > 1) args = words.slice(1);
+  }
+  const name = path.basename(file);
+  const kind = args ? 'other' : name === 'zsh' ? 'zsh' : name === 'bash' ? 'bash' : TERM_POSIX.has(name) ? 'posix' : name === 'fish' ? 'fish' : 'other';
+  return { file, name, kind, args: args || [], label: ['zsh', 'bash', 'posix', 'fish'].includes(kind) ? `${file} (login shell)` : file };
+}
+
+function terminalShellArgs(sh, mode, rcDir) {
+  const interactive = mode === 'pipes' ? ['-i'] : [];
+  if (sh.kind === 'zsh' || sh.kind === 'posix' || sh.kind === 'fish') return ['-l', ...interactive];
+  if (sh.kind === 'bash') return ['--rcfile', path.join(rcDir, 'bashrc'), ...interactive];
+  return sh.args;
+}
+
+// AGENT_COMPANION_TERMINAL_MODES (for the tests) picks the ways to start a session, in order.
+function terminalModes() {
+  const forced = process.env.AGENT_COMPANION_TERMINAL_MODES;
+  if (forced) return forced.split(',').map((m) => m.trim()).filter(Boolean);
+  return IS_WIN ? ['pipes'] : ['script', 'python', 'pipes'];
+}
+
+function findPython(PATH) {
+  const py = which('python3', PATH);
+  // On macOS /usr/bin/python3 is only a stub that opens an "install developer tools" dialog when they are missing.
+  if (py && IS_MAC && py === '/usr/bin/python3' && !isDir('/Library/Developer/CommandLineTools') && !isDir('/Applications/Xcode.app')) return null;
+  return py;
+}
+
+async function terminalEnv(s, rcDir) {
+  const env = await commandEnv();
+  delete env.GIT_TERMINAL_PROMPT; // here the agent can answer prompts
+  // Variables of the terminal app the companion was started from would make start-up files act for that app.
+  for (const k of Object.keys(env))
+    if (/^(TERM_PROGRAM|TERM_SESSION_ID|ITERM_|LC_TERMINAL|VSCODE_|KITTY_|WEZTERM_|ALACRITTY_|WT_SESSION|WT_PROFILE_ID|TMUX|STY$|PROMPT_COMMAND$|COLORTERM$|__AA_)/.test(k)) delete env[k];
+  Object.assign(env, { TERM: 'dumb', COLUMNS: String(TERM_COLS), LINES: String(TERM_ROWS), AGENT_AUTOMATION_TERMINAL: s.id, SHELL_SESSIONS_DISABLE: '1' });
+  if (IS_MAC) env.BASH_SILENCE_DEPRECATION_WARNING = '1';
+  if (!IS_WIN) {
+    env.__AA_SHELL = process.env.SHELL || userShell().own;
+    // util-linux `script -c` runs its command with $SHELL; the wrapper sets SHELL back.
+    if (process.platform === 'linux') env.SHELL = '/bin/sh';
+  }
+  if (s.sh.kind === 'zsh') {
+    env.__AA_USER_ZDOTDIR = process.env.ZDOTDIR || HOME;
+    if (process.env.ZDOTDIR) env.__AA_HAD_ZDOTDIR = '1';
+    env.ZDOTDIR = path.join(rcDir, 'zsh');
+  }
+  return env;
+}
+
+// All processes: pid, parent, process group, the terminal's foreground group, command (null when ps fails).
+async function psTable() {
+  const r = await runProcess('ps', ['-A', '-o', 'pid=,ppid=,pgid=,tpgid=,comm='], { timeoutMs: 5000, maxChars: 8e6 });
+  if (r.error || r.code !== 0) return null;
+  const rows = [];
+  for (const line of r.stdout.split('\n')) {
+    const m = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(-?\d+)\s+(.*)$/.exec(line);
+    if (m) rows.push({ pid: Number(m[1]), ppid: Number(m[2]), pgid: Number(m[3]), tpgid: Number(m[4]), comm: m[5].trim() });
+  }
+  return rows;
+}
+
+class TerminalSession {
+  constructor(id, name, sh, cwd) {
+    Object.assign(this, { id, name, sh, cwd, mode: null, pty: false, integrated: false, child: null, shellPid: null, note: '', closed: false, exited: false });
+    Object.assign(this, { created: Date.now(), lastUsed: Date.now(), queue: Promise.resolve(), lastTail: '', onPid: null, exitHow: '' });
+    this.resetOutput();
+  }
+
+  resetOutput() {
+    Object.assign(this, { pending: '', dropped: 0, carry: '', prompts: 0, atPrompt: false, lastExit: null, exitStatus: null, lastOutputAt: 0 });
+  }
+
+  label() {
+    return `${this.id}${this.name ? ` "${this.name}"` : ''}`;
+  }
+
+  touch() {
+    this.lastUsed = Date.now();
+  }
+
+  // One call at a time per session; Ctrl-C (terminal_interrupt) does not wait for its turn.
+  locked(fn) {
+    const run = this.queue.then(() => fn());
+    this.queue = run.catch(() => {});
+    return run;
+  }
+
+  spawnSpec(mode, rcDir, PATH) {
+    const sh = this.sh;
+    if (IS_WIN) return mode === 'pipes' ? { file: sh.file, args: sh.args, pty: false, integrated: sh.kind === 'powershell' } : null;
+    const args = terminalShellArgs(sh, mode, rcDir);
+    const integrated = sh.kind === 'zsh' || sh.kind === 'bash';
+    if (mode === 'pipes') return { file: sh.file, args, pty: false, integrated };
+    const inner = ['/bin/sh', '-c', TERM_WRAPPER, sh.file, ...args];
+    let helper;
+    if (mode === 'script') {
+      const s = IS_MAC && isExecutableFile('/usr/bin/script') ? '/usr/bin/script' : which('script', mergePath('/usr/bin:/bin', PATH));
+      if (!s) return null;
+      // util-linux (and BusyBox) take the command as one string; BSD and macOS take it as arguments.
+      helper = process.platform === 'linux' ? [s, '-qfc', inner.map(shQuote).join(' '), '/dev/null'] : [s, '-q', '/dev/null', ...inner];
+    } else if (mode === 'python') {
+      const py = findPython(PATH);
+      if (!py) return null;
+      helper = [py, '-c', 'import pty, sys\npty.spawn(sys.argv[1:])', ...inner];
+    } else return null;
+    return { file: '/bin/sh', args: ['-c', TERM_LAUNCHER, 'agent-terminal', ...helper], pty: true, integrated };
+  }
+
+  // Resolves with null once the shell runs, or with the reason it could not be started this way.
+  launch(mode, spec, env) {
+    if (!spec.pty && !IS_WIN) {
+      // No wrapper runs on plain pipes: undo what was set up for it here.
+      const { __AA_SHELL, ...rest } = env;
+      env = { ...rest, SHELL: __AA_SHELL || rest.SHELL };
+    }
+    return new Promise((resolve) => {
+      let child;
+      try {
+        child = spawn(spec.file, spec.args, { cwd: this.cwd, env, stdio: ['pipe', 'pipe', 'pipe'], detached: !IS_WIN, windowsHide: true });
+      } catch (e) {
+        return resolve(e.message);
+      }
+      this.resetOutput();
+      Object.assign(this, { child, mode, pty: spec.pty, integrated: spec.integrated, shellPid: spec.pty ? null : child.pid });
+      const outDec = new StringDecoder('utf8');
+      const errDec = new StringDecoder('utf8');
+      child.stdout.on('data', (b) => child === this.child && this.onOutput(outDec.write(b)));
+      child.stderr.on('data', (b) => child === this.child && this.onOutput(errDec.write(b)));
+      child.stdin.on('error', () => {});
+      let settled = false;
+      let timer = null;
+      const settle = (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.onPid = null;
+        resolve(err);
+      };
+      const fail = (why) => {
+        if (child === this.child) this.child = null;
+        killTree(child, 'SIGKILL');
+        settle(why);
+      };
+      child.on('error', (e) => (settled ? child === this.child && this.onExit(null, null) : fail(e.code === 'ENOENT' ? `${spec.file} was not found` : e.message)));
+      child.on('exit', (code, sig) => {
+        if (child !== this.child) return;
+        if (!settled) return fail(stripAnsi(this.pending).replace(/\s+/g, ' ').trim().slice(-300) || `it ended at once (${sig ? `signal ${sig}` : `exit code ${code}`})`);
+        this.onExit(code, sig);
+      });
+      if (!spec.pty) return child.once('spawn', () => settle(null));
+      this.onPid = () => settle(null);
+      timer = setTimeout(() => fail(`the shell did not start within ${TERM_START_MS / 1000} s`), TERM_START_MS);
+    });
+  }
+
+  async start(signal) {
+    const rcDir = IS_WIN ? '' : terminalRcDir();
+    const env = await terminalEnv(this, rcDir);
+    const failures = [];
+    for (const mode of terminalModes()) {
+      if (signal?.aborted) break;
+      const spec = this.spawnSpec(mode, rcDir, env.PATH);
+      if (!spec) continue;
+      const err = await this.launch(mode, spec, env);
+      if (!err) break;
+      failures.push(`${mode}: ${err}`);
+      log('WARN', `Terminal ${this.id} could not start with ${mode}: ${err}`);
+    }
+    if (!this.child) throw new ToolError(`Could not start a terminal session. ${failures.join('; ') || 'There is no way to start one on this computer.'}`);
+    if (IS_WIN) this.note = 'Windows: this session talks to PowerShell through plain pipes, not a real console (that would need native code), so programs that need a console window (prompts, full-screen programs) may not work.';
+    else if (!this.pty) this.note = 'No terminal (pty) could be created here ("script" and python3 are missing), so this session uses plain pipes: programs that need a terminal (password prompts, full-screen programs, REPLs without -i) may not work.';
+    if (IS_WIN && this.integrated) this.write(WIN_TERM_INIT + WIN_TERM_MARK);
+    // Ready when the first prompt marker arrives (zsh, bash), or when the start-up output has settled.
+    const t0 = Date.now();
+    for (;;) {
+      if (signal?.aborted || this.exited) return false;
+      const quiet = Date.now() - Math.max(this.lastOutputAt, t0);
+      if (this.integrated ? this.prompts > 0 && quiet >= 100 : quiet >= 400) return true;
+      if (Date.now() - t0 > (this.integrated ? TERM_READY_MS : 4000)) return false;
+      await sleep(40);
+    }
+  }
+
+  onOutput(s) {
+    if (!s) return;
+    this.lastOutputAt = Date.now();
+    this.scan(s);
+    this.pending += s;
+    if (this.pending.length > TERM_SCROLLBACK) {
+      const cut = this.pending.length - TERM_SCROLLBACK;
+      let at = this.pending.indexOf('\n', cut);
+      if (at < 0 || at - cut > 4096) at = cut;
+      this.dropped += at;
+      this.pending = this.pending.slice(at);
+    }
+  }
+
+  scan(s) {
+    const text = this.carry + s;
+    TERM_MARK_RE.lastIndex = 0;
+    let m;
+    while ((m = TERM_MARK_RE.exec(text))) {
+      if (m[2] === 'Pid') {
+        this.shellPid = Number(m[3]) || this.shellPid;
+        this.onPid?.();
+      } else if (m[2] === 'Cwd') this.cwd = m[3] || this.cwd;
+      else if (m[2] === 'Exit') this.exitStatus = Number(m[3]);
+      else {
+        this.prompts++;
+        this.atPrompt = true;
+        this.lastExit = m[1] ? Number(m[1]) : null;
+      }
+    }
+    // A marker cut in two by the pipe is scanned again together with the next chunk.
+    const i = text.lastIndexOf('\x1b');
+    this.carry = i >= 0 && text.length - i < 512 && (text[i + 1] === ']' || i === text.length - 1) && !text.includes('\x07', i) ? text.slice(i) : '';
+  }
+
+  onExit(code, sig) {
+    if (this.exited) return;
+    this.exited = true;
+    this.atPrompt = false;
+    const status = this.exitStatus ?? (this.pty ? null : code);
+    this.exitHow = status !== null && status !== undefined ? `exit code ${status}` : sig ? `signal ${sig}` : `exit code ${code}`;
+    if (!this.closed) event(`Terminal ${this.id}: the shell ended (${this.exitHow}).`);
+    if (this.child) killTree(this.child); // whatever is left of the pty helper
+  }
+
+  write(data) {
+    if (!this.child || this.exited) throw new ToolError(`Terminal ${this.label()} has ended.`);
+    this.child.stdin.write(data);
+  }
+
+  take() {
+    const end = completeEnd(this.pending);
+    const t = { raw: this.pending.slice(0, end), dropped: this.dropped };
+    this.pending = this.pending.slice(end);
+    this.dropped = 0;
+    return t;
+  }
+
+  untake(t) {
+    this.pending = t.raw + this.pending;
+    this.dropped += t.dropped;
+  }
+
+  // What runs in the foreground of the terminal, from `ps`: { busy, name, pgid }, or null when that cannot be told.
+  async foreground() {
+    if (!this.pty || !this.shellPid || this.exited || IS_WIN) return null;
+    const rows = await psTable();
+    const sh = rows?.find((x) => x.pid === this.shellPid);
+    if (!sh || sh.tpgid <= 0) return null;
+    if (sh.tpgid === sh.pgid) return { busy: false };
+    const fg = rows.find((x) => x.pid === sh.tpgid) || rows.find((x) => x.pgid === sh.tpgid);
+    // macOS ps shows a process that has just ended, not yet reaped, as "(name)".
+    return { busy: true, pgid: sh.tpgid, name: fg ? path.basename(fg.comm.replace(/^-/, '').replace(/^\((.+)\)$/, '$1')) : '' };
+  }
+
+  // Waits for: the text (wait_for), the prompt (the command finished), quiet output, the session ending, or the timeout.
+  async waitOutput({ mode, waitFor = null, quietMs = 800, timeoutMs, signal, echo = null }) {
+    const start = Date.now();
+    let seen = -1;
+    let text = '';
+    let lastPs = 0;
+    for (;;) {
+      if (signal?.aborted) return 'cancelled';
+      if (this.exited) {
+        await sleep(100);
+        return 'exited';
+      }
+      const now = Date.now();
+      const quiet = now - Math.max(this.lastOutputAt, start);
+      if (waitFor) {
+        if (this.pending.length !== seen) {
+          seen = this.pending.length;
+          text = renderTerm(this.pending);
+          if (echo !== null) text = stripEcho(text, echo);
+        }
+        if (waitFor.test(text)) return 'matched';
+        // Back at the prompt without it: nothing more will come.
+        if (this.atPrompt && quiet >= 200) return 'prompt';
+      } else if (mode === 'settle') {
+        if (quiet >= 200) return 'quiet';
+      } else if (mode === 'finish') {
+        if (this.integrated) {
+          if (this.atPrompt && quiet >= 150) return 'prompt';
+        } else if (this.pty && quiet >= 300 && now - lastPs >= 500) {
+          lastPs = now;
+          const fg = await this.foreground();
+          if (fg && !fg.busy) return 'idle';
+          if (!fg && quiet >= quietMs) return 'quiet';
+        } else if (!this.pty && quiet >= quietMs) return 'quiet';
+      } else {
+        if (this.atPrompt && quiet >= 150) return 'prompt';
+        if (quiet >= quietMs) return 'quiet';
+      }
+      if (now - start >= timeoutMs) return 'timeout';
+      await sleep(40);
+    }
+  }
+
+  // The tool result: a status line, then the new output as plain text.
+  async report({ reason, prior = null, fresh, echo = null, waitFor = null, timeoutSec = 0, quietMs = 800, opened = '' }) {
+    let out = fresh.raw ? renderTerm(fresh.raw) : '';
+    if (echo !== null) out = stripEcho(out, echo);
+    let text = prior?.raw ? renderTerm(prior.raw) : '';
+    if (text && out && !text.endsWith('\n')) text += '\n';
+    text += out;
+    const dropped = (prior?.dropped || 0) + fresh.dropped;
+    const omitted = Math.max(0, text.length - 2 * Math.floor(OUTPUT_CAP / 2));
+    text = capText(text, OUTPUT_CAP);
+    this.lastTail = text.slice(-300);
+    const fg = this.exited ? null : await this.foreground();
+    const running = this.exited ? false : fg ? fg.busy || (this.integrated && !this.atPrompt) : this.integrated ? !this.atPrompt : reason === 'timeout';
+    const fgName = fg?.busy ? fg.name : '';
+    const finished = this.integrated && this.lastExit !== null ? `exit code ${this.lastExit}` : '';
+    let status;
+    if (this.exited) status = `The shell has ended (${this.exitHow}); the session is closed.`;
+    else if (opened) status = `${opened}${running ? ' Its start-up files have not shown a prompt yet (they may be busy or waiting for an answer).' : ''}`;
+    else if (reason === 'matched') status = `Found ${waitFor.label}.${running ? ` Still running${fgName ? `: ${fgName}` : ''}.` : ''}`;
+    else if (!running) {
+      status = finished ? `The command finished (${finished}).` : 'Ready for the next command.';
+      if (waitFor) status = `${waitFor.label} did not appear. ${status}`;
+    } else {
+      const what = `Still running${fgName ? `: ${fgName}` : ''}`;
+      if (reason === 'timeout') status = `${what} after ${timeoutSec} s${waitFor ? ` (${waitFor.label} did not appear)` : ''}.`;
+      else if (reason === 'quiet') status = `${what}; no new output for ${fmtWait(quietMs)} (it may be waiting for input).`;
+      else status = `${what}.`;
+      status += ' Answer it with terminal_send, wait with terminal_read (timeout_sec), or stop it with terminal_interrupt.';
+    }
+    const notes = [];
+    if (!opened && !running && !this.exited && this.integrated && this.cwd) notes.push(`folder ${tildePath(this.cwd)}`);
+    if (omitted) notes.push(`${omitted.toLocaleString('en-US')} characters omitted in the middle`);
+    if (dropped) notes.push(`the first ${dropped.toLocaleString('en-US')} characters were dropped: a session keeps the last ${TERM_SCROLLBACK / 1024} KB between reads`);
+    const head = `[terminal ${this.label()}] ${status}${notes.length ? ` (${notes.join('; ')})` : ''}${this.note && opened ? `\nNote: ${this.note}` : ''}`;
+    const meta = { id: this.id, still_running: running, reason };
+    if (waitFor) meta.matched = reason === 'matched';
+    if (!running && finished) meta.exit_code = this.lastExit;
+    if (this.cwd) meta.cwd = this.cwd;
+    if (fgName) meta.foreground = fgName;
+    if (omitted) meta.omitted_chars = omitted;
+    if (dropped) meta.dropped_chars = dropped;
+    if (this.exited) {
+      meta.exited = true;
+      if (Number.isInteger(this.exitStatus)) meta.exit_code = this.exitStatus;
+      else delete meta.exit_code;
+      this.close('the shell ended', true);
+    }
+    return { content: [{ type: 'text', text: `${head}\n${text || '(no new output)'}` }], structuredContent: meta };
+  }
+
+  async interrupt() {
+    if (IS_WIN) {
+      // No console to send Ctrl-C to: stop the programs PowerShell started instead.
+      const ps = `Get-CimInstance Win32_Process -Filter "ParentProcessId=${Number(this.shellPid)}" | ForEach-Object { taskkill /PID $_.ProcessId /T /F | Out-Null }`;
+      await runProcess('powershell.exe', psArgs(ps), { timeoutMs: 15000 });
+    } else if (this.pty) this.write('\x03');
+    else await this.signalChildren('SIGINT');
+  }
+
+  // Plain pipes have no terminal to press Ctrl-C on: signal what the shell started (each in its own group or not).
+  async signalChildren(sig) {
+    const rows = (await psTable()) || [];
+    const kids = rows.filter((x) => x.ppid === this.shellPid);
+    for (const k of kids) {
+      try {
+        process.kill(k.pgid === this.shellPid ? k.pid : -k.pgid, sig);
+      } catch {}
+    }
+    return kids.length;
+  }
+
+  close(reason, quiet = false) {
+    if (this.closed) return;
+    this.closed = true;
+    terminals.delete(this.id);
+    const child = this.child;
+    if (IS_WIN) {
+      if (child && !this.exited) killTree(child);
+    } else if (!this.exited) {
+      // Interactive shells ignore SIGTERM. One hang-up ends the shell, which passes it on to its jobs, and the pty
+      // helper then ends by itself. Only one: bash dies at once on a second SIGHUP (or on the pty hanging up) that
+      // arrives while it handles the first, before it has hung up its background jobs.
+      try {
+        process.kill(this.shellPid || child.pid, 'SIGHUP');
+      } catch {}
+      setTimeout(() => {
+        if (this.exited) return;
+        for (const target of [this.shellPid, child && -child.pid].filter(Boolean)) {
+          try {
+            process.kill(target, 'SIGKILL');
+          } catch {}
+        }
+      }, 2000).unref();
+    }
+    if (!quiet) event(`Terminal ${this.id} closed (${reason}).`);
+  }
+}
+
+function findTerminal(v) {
+  if (typeof v === 'number') v = String(v);
+  if (typeof v !== 'string' || !v.trim()) return null;
+  const key = v.trim();
+  return terminals.get(key) || terminals.get(`t${key}`) || [...terminals.values()].find((s) => s.name && s.name.toLowerCase() === key.toLowerCase()) || null;
+}
+
+function getTerminal(v) {
+  if (v === undefined || v === null || v === '') throw new ToolError('Invalid arguments: "id" is required: the id from terminal_open or terminal_list, e.g. "t1".');
+  const s = findTerminal(v);
+  if (s) return s;
+  const open = [...terminals.values()].map((x) => x.label());
+  throw new ToolError(`There is no terminal session "${v}". ${open.length ? `Open sessions: ${open.join(', ')}.` : 'None is open: start one with terminal_open.'}`);
+}
+
+function closeAllTerminals(reason) {
+  const pids = [];
+  for (const s of [...terminals.values()]) {
+    if (s.shellPid && !s.exited) pids.push(s.shellPid);
+    s.close(reason);
+  }
+  return pids;
+}
+
+// Sessions not used by the agent, and silent, for terminalIdleMinutes are closed.
+function scheduleTerminalIdleCheck() {
+  clearTimeout(terminalIdleTimer);
+  terminalIdleTimer = null;
+  const minutes = config.terminalIdleMinutes;
+  if (!minutes || !terminals.size) return;
+  const idleMs = minutes * 60000;
+  terminalIdleTimer = setTimeout(() => {
+    for (const s of [...terminals.values()]) {
+      if (Date.now() - Math.max(s.lastUsed, s.lastOutputAt) >= idleMs) s.close(`not used for ${minutes} minute${minutes === 1 ? '' : 's'}`);
+    }
+    scheduleTerminalIdleCheck();
+  }, Math.max(1000, Math.min(30000, idleMs / 4)));
+  terminalIdleTimer.unref?.();
+}
+
+const terminalIdleText = () => (config.terminalIdleMinutes ? `${config.terminalIdleMinutes} minute${config.terminalIdleMinutes === 1 ? '' : 's'}` : 'a long time (never, as set up now)');
+
+function terminalStatus() {
+  return [...terminals.values()].map((s) => ({ id: s.id, name: s.name, pid: s.shellPid, idle: Math.round((Date.now() - s.lastUsed) / 1000), shell: s.sh.name, pty: s.pty, ...(s.exited && { exited: true }) }));
+}
+
+const PASSWORD_PROMPT_RE = /(pass(word|phrase|code)?|passwort|mot de passe|contraseña|\bpin\b|token|secret|api key)[^\n]{0,40}[:?]\s*$/i;
+
+// For the log: an answer to a password prompt is not written down.
+function terminalInputSummary(args) {
+  const s = findTerminal(args.id);
+  const input = typeof args.input === 'string' ? args.input : '';
+  const shown = s && PASSWORD_PROMPT_RE.test(s.lastTail) ? `(${input.length} characters, hidden: the answer to a password prompt)` : JSON.stringify(input.length > 200 ? `${input.slice(0, 200)}…` : input);
+  return `${args.id} ${shown}`;
+}
+
+async function terminalOpenTool(args, signal) {
+  const name = (optString(args, 'name') || '').trim();
+  if (name.length > 40 || /[\x00-\x1f]/.test(name)) throw new ToolError('Invalid arguments: "name" must be at most 40 characters.');
+  const cwd = optString(args, 'cwd') ? resolveUserPath(args.cwd) : HOME;
+  if (!isDir(cwd)) throw new ToolError(`The folder does not exist: ${cwd}`);
+  const sh = await resolveTerminalShell(optString(args, 'shell'));
+  // A session whose shell has ended (kept until its last output is read) does not count.
+  const live = [...terminals.values()].filter((s) => !s.exited);
+  if (live.length >= TERM_MAX) throw new ToolError(`There are already ${TERM_MAX} terminal sessions open (${live.map((s) => s.label()).join(', ')}). Reuse one of them, or close one with terminal_close.`);
+  if (name && [...terminals.values()].some((s) => s.name.toLowerCase() === name.toLowerCase())) throw new ToolError(`A terminal session called "${name}" is already open. Use it, or choose another name.`);
+  const s = new TerminalSession(`t${++terminalSeq}`, name, sh, cwd);
+  terminals.set(s.id, s);
+  let ready;
+  try {
+    ready = await s.start(signal);
+  } catch (e) {
+    s.close('it could not start', true);
+    throw e;
+  }
+  scheduleTerminalIdleCheck();
+  if (signal?.aborted) {
+    s.close('the request was cancelled');
+    return toolError('Cancelled.');
+  }
+  s.touch();
+  if (!ready && !s.exited) s.atPrompt = false;
+  const how = s.pty ? 'on a real terminal (pty)' : 'on plain pipes (no terminal)';
+  const opened = `Opened ${sh.label} ${how} in ${tildePath(s.cwd)}. It keeps its state between calls: send commands with terminal_send and id "${s.id}".`;
+  const r = await s.report({ reason: ready ? 'prompt' : 'timeout', fresh: s.take(), opened });
+  Object.assign(r.structuredContent, { shell: sh.file, pty: s.pty, pid: s.shellPid, name: s.name || undefined });
+  return r;
+}
+
+async function terminalSendTool(args, signal) {
+  const s = getTerminal(args.id);
+  if (typeof args.input !== 'string') throw new ToolError('Invalid arguments: "input" is required and must be a string (it may be empty to just press Enter).');
+  if (args.input.length > 200000) throw new ToolError('Invalid arguments: "input" is longer than 200,000 characters. Write long content to a file with write_file instead.');
+  const pressEnter = args.press_enter !== false && args.press_enter !== 'false';
+  const waitFor = parseWaitFor(optString(args, 'wait_for'));
+  const quietMs = intArg(args.quiet_ms, 'quiet_ms', 800, 100, 600000);
+  const timeoutSec = intArg(args.timeout_sec, 'timeout_sec', 30, 1, 600);
+  return s.locked(async () => {
+    s.touch();
+    if (s.exited) return s.report({ reason: 'exited', fresh: s.take() });
+    const prior = s.take();
+    let data = s.pty ? args.input.replace(/\r\n|\n/g, '\r') : args.input;
+    if (pressEnter) data += s.pty ? '\r' : '\n';
+    if (/[\r\n]/.test(data)) s.atPrompt = false;
+    s.write(data);
+    if (IS_WIN && s.integrated && pressEnter) s.write(WIN_TERM_MARK);
+    const echo = s.pty ? args.input : null;
+    const reason = await s.waitOutput({ mode: 'send', waitFor, quietMs, timeoutMs: timeoutSec * 1000, signal, echo });
+    if (reason === 'cancelled') {
+      s.untake(prior);
+      return toolError('Cancelled. The terminal session is still open and keeps the output for the next terminal_read.');
+    }
+    return s.report({ reason, prior, fresh: s.take(), echo, waitFor, timeoutSec, quietMs });
+  });
+}
+
+async function terminalReadTool(args, signal) {
+  const s = getTerminal(args.id);
+  const waitFor = parseWaitFor(optString(args, 'wait_for'));
+  const timeoutSec = intArg(args.timeout_sec, 'timeout_sec', waitFor ? 30 : 0, 0, 600);
+  return s.locked(async () => {
+    s.touch();
+    const mode = waitFor ? 'wait' : timeoutSec ? 'finish' : 'settle';
+    const reason = await s.waitOutput({ mode, waitFor, timeoutMs: (timeoutSec || 2) * 1000, signal });
+    if (reason === 'cancelled') return toolError('Cancelled. The terminal session is still open.');
+    s.touch();
+    return s.report({ reason, fresh: s.take(), waitFor, timeoutSec });
+  });
+}
+
+async function terminalInterruptTool(args, signal) {
+  const s = getTerminal(args.id);
+  s.touch();
+  if (!s.exited) await s.interrupt();
+  return s.locked(async () => {
+    if (s.exited) return s.report({ reason: 'exited', fresh: s.take() });
+    let reason = await s.waitOutput({ mode: 'finish', quietMs: 500, timeoutMs: 3000, signal });
+    // A program that ignores Ctrl-C (or put the terminal in raw mode) gets SIGINT directly, then SIGTERM.
+    for (const sig of ['SIGINT', 'SIGTERM']) {
+      if (reason !== 'timeout' || IS_WIN || signal?.aborted || s.exited) break;
+      if (s.pty) {
+        const fg = await s.foreground();
+        if (!fg?.busy || !fg.pgid) break;
+        try {
+          process.kill(-fg.pgid, sig);
+        } catch {}
+      } else {
+        if (sig === 'SIGINT') continue; // interrupt() already sent it to the children
+        if (!(await s.signalChildren(sig))) break;
+      }
+      reason = await s.waitOutput({ mode: 'finish', quietMs: 500, timeoutMs: 2000, signal });
+    }
+    if (reason === 'cancelled') return toolError('Cancelled. The terminal session is still open.');
+    return s.report({ reason, fresh: s.take(), timeoutSec: 3 });
+  });
+}
+
+async function terminalCloseTool(args) {
+  const s = getTerminal(args.id);
+  const rest = s.exited || s.pending ? renderTerm(s.take().raw) : '';
+  s.close('closed by the agent');
+  return textResult(`Closed terminal ${s.label()}${s.exited ? ` (the shell had already ended: ${s.exitHow})` : ' and stopped everything running in it'}.${rest.trim() ? `\nOutput that had not been read:\n${capText(rest, OUTPUT_CAP)}` : ''}`);
+}
+
+async function terminalListTool() {
+  if (!terminals.size) return textResult('No terminal sessions are open. Start one with terminal_open.');
+  const all = [...terminals.values()];
+  const fgs = await Promise.all(all.map((s) => s.foreground().catch(() => null)));
+  const lines = all.map((s, i) => {
+    const fg = fgs[i];
+    const running = s.exited ? 'ended' : fg ? (fg.busy ? `running: ${fg.name || 'a program'}` : s.integrated && !s.atPrompt ? 'running' : 'idle') : s.integrated ? (s.atPrompt ? 'idle' : 'running') : 'unknown';
+    const unread = Buffer.byteLength(s.pending);
+    return (
+      `${s.label()}  ${s.sh.name}${s.pty ? '' : ' (pipes)'}  pid ${s.shellPid ?? '?'}  ${running}  folder ${tildePath(s.cwd)}  ` +
+      `idle ${Math.round((Date.now() - s.lastUsed) / 1000)} s  unread ${fmtBytes(unread)}`
+    );
+  });
+  return textResult(`${all.length} terminal session${all.length === 1 ? '' : 's'} (close idle ones after ${terminalIdleText()}):\n${lines.join('\n')}`);
+}
+
+const termIdProp = { type: 'string', description: 'The session id from terminal_open or terminal_list (e.g. "t1"), or its name.' };
+const waitForProp = (what) => ({ type: 'string', description: `${what} Plain text (case-insensitive), or a regular expression written as /…/, e.g. "password:", ">>> ", "/[$#%>] $/".` });
+
+const TERMINAL_BUILTINS = [
+  {
+    name: 'terminal_open',
+    group: 'terminal',
+    gate: 'shell',
+    title: 'Open a terminal session',
+    description: () =>
+      `Open a persistent terminal session on the user's computer: an interactive ${IS_WIN ? 'PowerShell' : `${userShell().name} shell on a real terminal`} that keeps its state between calls (current folder, environment variables, running programs such as python, node, ssh, psql or any REPL). ` +
+      'Workflow: open once, then terminal_send a command, read the output it returns, decide, and send the next one, with the same id for the whole task. ' +
+      `Sessions stay open between tool calls (terminal_list shows them) and are closed after ${terminalIdleText()} without use; close them with terminal_close when done. For a single command, run_command is simpler.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        cwd: pathProp('Folder to start in. Default: the home folder.'),
+        shell: { type: 'string', description: IS_WIN ? 'Program to run instead of Windows PowerShell, e.g. "pwsh".' : `Shell or program to run instead of the user's shell (${userShell().name}), e.g. "bash", "zsh", "python3".` },
+        name: { type: 'string', description: 'Optional short label such as "build" or "db"; it can be used instead of the id.' },
+      },
+    },
+    annotations: { title: 'Open a terminal session', readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+    run: terminalOpenTool,
+  },
+  {
+    name: 'terminal_send',
+    group: 'terminal',
+    gate: 'shell',
+    title: 'Type into a terminal session',
+    description: () =>
+      'Type input into a terminal session, press Enter (unless press_enter is false) and return the output it produced (the echoed input and escape codes are removed). ' +
+      'It returns when the command finishes (the prompt is back; you get its exit code), when wait_for appears, when no new output came for quiet_ms (default 800, e.g. a program waiting for input), or after timeout_sec (default 30, max 600). ' +
+      '"Still running" means a program is busy or waiting for input: answer it with terminal_send, wait with terminal_read and timeout_sec, or stop it with terminal_interrupt. ' +
+      'For interactive programs use wait_for with their prompt, e.g. "password:", ">>> " (python), "mysql>", "(y/n)". ' +
+      'Control keys: input "\\u0003" is Ctrl-C, "\\u0004" Ctrl-D (end of input), "\\u001b" Escape (with press_enter false). ' +
+      'Avoid full-screen programs (vim, nano, top, less): use non-interactive forms (cat, sed, write_file, top -l 1, git --no-pager).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: termIdProp,
+        input: { type: 'string', description: 'What to type: a command line, an answer to a prompt, or control characters. Empty to just press Enter.' },
+        press_enter: { type: 'boolean', description: 'Press Enter after the input. Default true.' },
+        wait_for: waitForProp('Return as soon as this appears in the new output.'),
+        quiet_ms: { type: 'integer', minimum: 100, maximum: 600000, description: 'Return when no new output arrived for this many milliseconds (not used with wait_for). Default 800.' },
+        timeout_sec: { type: 'number', minimum: 1, maximum: 600, description: 'Longest time to wait. Default 30.' },
+      },
+      required: ['id', 'input'],
+    },
+    annotations: { title: 'Type into a terminal session', readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+    run: terminalSendTool,
+  },
+  {
+    name: 'terminal_read',
+    group: 'terminal',
+    gate: 'shell',
+    title: 'Read a terminal session',
+    description: () =>
+      'Return the output a terminal session produced since the last call. Without wait_for or timeout_sec it returns at once. ' +
+      'With timeout_sec it waits up to that long for the running command to finish (the shell prompt to come back); with wait_for it waits for that text. ' +
+      'Use it to follow a long command started with terminal_send.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: termIdProp,
+        wait_for: waitForProp('Wait until this appears.'),
+        timeout_sec: { type: 'number', minimum: 0, maximum: 600, description: 'Longest time to wait. Default 0 (no waiting), or 30 with wait_for.' },
+      },
+      required: ['id'],
+    },
+    annotations: { title: 'Read a terminal session', readOnlyHint: true },
+    run: terminalReadTool,
+  },
+  {
+    name: 'terminal_interrupt',
+    group: 'terminal',
+    gate: 'shell',
+    title: 'Press Ctrl-C in a terminal session',
+    description: () =>
+      `Stop the command running in a terminal session by pressing Ctrl-C (SIGINT to the program in the foreground${IS_WIN ? '; on Windows the programs started from the session are ended' : '; one that ignores it is then sent SIGINT and SIGTERM directly'}), and return the output. The session stays open.`,
+    inputSchema: { type: 'object', properties: { id: termIdProp }, required: ['id'] },
+    annotations: { title: 'Press Ctrl-C in a terminal session', readOnlyHint: false, destructiveHint: true },
+    run: terminalInterruptTool,
+  },
+  {
+    name: 'terminal_close',
+    group: 'terminal',
+    gate: 'shell',
+    title: 'Close a terminal session',
+    description: () => 'Close a terminal session and stop everything still running in it. Returns any output that had not been read.',
+    inputSchema: { type: 'object', properties: { id: termIdProp }, required: ['id'] },
+    annotations: { title: 'Close a terminal session', readOnlyHint: false, destructiveHint: true },
+    run: terminalCloseTool,
+  },
+  {
+    name: 'terminal_list',
+    group: 'terminal',
+    gate: 'shell',
+    title: 'List terminal sessions',
+    description: () => 'List the open terminal sessions: id and name, shell, process id, whether a command is running in it (and which), current folder, seconds since last use and unread output.',
+    inputSchema: { type: 'object', properties: {} },
+    annotations: { title: 'List terminal sessions', readOnlyHint: true },
+    run: terminalListTool,
+  },
+];
 
 const DESKTOP_BUILTINS = [
   {
@@ -2332,9 +3719,112 @@ const DESKTOP_BUILTINS = [
     annotations: { title: 'Type text', readOnlyHint: false, destructiveHint: true },
     run: typeInAppTool,
   },
+  {
+    name: 'app_read_text',
+    group: 'desktop',
+    title: 'Read the text in an app window',
+    description: () =>
+      `Read all the text of the document or text field in another application's window, through the clipboard: it focuses "window", presses Select All and Copy (${primaryMod()}+a ${primaryMod()}+c), returns the copied text, then puts the user's clipboard back (text only) and collapses the selection with the Right arrow key. ` +
+      'Works with TextEdit, Notepad, gedit, VS Code, browser text areas and most editors; a spreadsheet gives the copied cells as tab-separated text. ' +
+      (D_MAC ? 'For apps that can be scripted (TextEdit, Excel, Numbers…) run_applescript is more precise. ' : D_WIN ? 'For Office apps run_powershell (COM) is more precise. ' : '') +
+      'It presses keys in that window, so the window must show the text with the keyboard focus in it.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        window: { type: 'string', description: `The window: its id from list_windows, its title or part of it${D_MAC ? ', or an app name such as "TextEdit"' : ''}. Leave out only to use the window that already has the focus.` },
+        keep_selection: { type: 'boolean', description: 'Leave all the text selected afterwards. Default false.' },
+      },
+    },
+    annotations: { title: 'Read the text in an app window', readOnlyHint: false, destructiveHint: false },
+    run: appReadTextTool,
+  },
+  {
+    name: 'app_write_text',
+    group: 'desktop',
+    title: 'Write text into an app window',
+    description: () =>
+      'Write text into the document or text field in another application\'s window by pasting it: it focuses "window", then mode "replace" (default) selects everything and pastes over it, ' +
+      `"append" moves to the end (${D_MAC ? 'cmd+Down' : 'ctrl+End'}) and pastes, "insert" pastes at the cursor. The user's clipboard is put back afterwards (text only). ` +
+      `Faster and more exact than type_in_app for long text. It does not save: press ${primaryMod()}+s with send_keys.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        window: { type: 'string', description: `The window: its id from list_windows, its title or part of it${D_MAC ? ', or an app name such as "TextEdit"' : ''}. Leave out only to use the window that already has the focus.` },
+        text: { type: 'string', description: 'The text to write.' },
+        mode: { type: 'string', enum: ['replace', 'append', 'insert'], description: 'replace (default): all the text; append: at the end; insert: at the cursor.' },
+      },
+      required: ['text'],
+    },
+    annotations: { title: 'Write text into an app window', readOnlyHint: false, destructiveHint: true },
+    run: appWriteTextTool,
+  },
+  {
+    name: 'app_open_file',
+    group: 'desktop',
+    title: 'Open a file in an application',
+    description: () =>
+      `Open a file in its default application, or in "app" (e.g. ${D_MAC ? '"TextEdit", "Microsoft Excel", "Numbers"' : D_WIN ? '"notepad", "excel", "winword"' : '"gedit", "LibreOffice Calc"'}), and report the window that shows it. ` +
+      `Then work in it with app_read_text, app_write_text, send_keys${D_MAC ? ' or run_applescript' : D_WIN ? ' or run_powershell' : ''}.`,
+    inputSchema: {
+      type: 'object',
+      properties: { path: pathProp('The file to open.'), app: { type: 'string', description: 'Optional application to open it with, by name as shown by list_apps.' } },
+      required: ['path'],
+    },
+    annotations: { title: 'Open a file in an application', readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+    run: appOpenFileTool,
+  },
+  {
+    name: 'run_applescript',
+    group: 'desktop',
+    gate: 'shell',
+    platforms: ['darwin'],
+    title: 'Run AppleScript',
+    description: () =>
+      'Run AppleScript (or JavaScript for Automation with language "JavaScript") on this Mac with osascript and return its result. Use it to control applications and read their content. Examples to adapt:\n' +
+      '- TextEdit: tell application "TextEdit" to get text of front document | tell application "TextEdit" to set text of front document to "Hello" | tell application "TextEdit" to make new document with properties {text:"Hi"} | tell application "TextEdit" to save front document in POSIX file "/Users/me/notes.txt"\n' +
+      '- Microsoft Excel: tell application "Microsoft Excel" to get value of range "A1:C5" of active sheet | tell application "Microsoft Excel" to set value of cell "B2" of active sheet to 42 | tell application "Microsoft Excel" to make new workbook | tell application "Microsoft Excel" to save workbook as active workbook filename "/Users/me/book.xlsx"\n' +
+      '- Numbers: tell application "Numbers" to get value of cell "B2" of table 1 of sheet 1 of front document | tell application "Numbers" to set value of cell "B2" of table 1 of sheet 1 of front document to 42\n' +
+      '- Terminal app (the user\'s own windows; for your own shell use terminal_open): tell application "Terminal" to do script "ls" in front window | tell application "Terminal" to get contents of selected tab of front window\n' +
+      '- Finder: tell application "Finder" to get name of every item of desktop | Safari: tell application "Safari" to get URL of current tab of front window | Mail: tell application "Mail" to get subject of messages 1 thru 5 of inbox\n' +
+      '- Bring an app to the front: tell application "TextEdit" to activate\n' +
+      'Multi-line scripts are fine. The first time a script controls an app, macOS asks the user to allow it (Automation permission) and the script waits for the answer.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        script: { type: 'string', description: 'The script.' },
+        language: { type: 'string', enum: ['AppleScript', 'JavaScript'], description: 'Default AppleScript.' },
+        timeout_sec: { type: 'number', minimum: 1, maximum: 600, description: 'Seconds before it is stopped. Default 60.' },
+      },
+      required: ['script'],
+    },
+    annotations: { title: 'Run AppleScript', readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+    run: runAppleScriptTool,
+  },
+  {
+    name: 'run_powershell',
+    group: 'desktop',
+    gate: 'shell',
+    platforms: ['win32'],
+    title: 'Run a PowerShell script',
+    description: () =>
+      'Run a PowerShell script on this Windows computer (Windows PowerShell, no profile, not interactive) and return its output. Use it to control applications through COM automation. Examples to adapt:\n' +
+      '- Excel: $x = New-Object -ComObject Excel.Application; $x.Visible = $true; $wb = $x.Workbooks.Add(); $wb.Sheets(1).Range("A1").Value2 = 42; $wb.Sheets(1).Range("A1:C5").Value2 (read); $wb.SaveAs("$env:USERPROFILE\\Documents\\book.xlsx")\n' +
+      '- Excel that is already open: $x = [Runtime.InteropServices.Marshal]::GetActiveObject("Excel.Application"); $x.ActiveSheet.Range("B2").Value2\n' +
+      '- Word: $w = New-Object -ComObject Word.Application; $w.Visible = $true; $d = $w.Documents.Add(); $d.Content.Text = "Hello"; $d.Content.Text (read); $d.SaveAs2("$env:USERPROFILE\\Documents\\note.docx")\n' +
+      '- Notepad: Start-Process notepad; Start-Sleep 1; $s = New-Object -ComObject WScript.Shell; $s.AppActivate("Notepad") | Out-Null; $s.SendKeys("Hello{ENTER}")\n' +
+      'The script arrives on standard input and runs as one script block. Untested on real Windows so far.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        script: { type: 'string', description: 'The PowerShell script.' },
+        timeout_sec: { type: 'number', minimum: 1, maximum: 600, description: 'Seconds before it is stopped. Default 60.' },
+      },
+      required: ['script'],
+    },
+    annotations: { title: 'Run a PowerShell script', readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+    run: runPowerShellTool,
+  },
 ];
-
-const pathProp = (what) => ({ type: 'string', description: `${what} ~ and relative paths are resolved against the user's home folder.` });
 
 const BUILTINS = [
   {
@@ -2466,6 +3956,7 @@ const BUILTINS = [
     annotations: { title: 'Describe this computer', readOnlyHint: true },
     run: systemInfoTool,
   },
+  ...TERMINAL_BUILTINS,
   ...DESKTOP_BUILTINS,
 ];
 const BUILTIN_BY_NAME = new Map(BUILTINS.map((t) => [t.name, t]));
@@ -2475,7 +3966,7 @@ const toolEnabled = (t) => (t.gate === 'shell' ? config.allowShell : t.gate === 
 // Built-in tools that are on: the desktop group only where its helper programs exist.
 async function enabledBuiltins() {
   const d = config.desktopTools ? await desktopInfo() : null;
-  return BUILTINS.filter((t) => (t.group === 'desktop' ? !!d && d.available.includes(t.name) : toolEnabled(t)));
+  return BUILTINS.filter((t) => (t.group === 'desktop' ? !!d && d.available.includes(t.name) && toolEnabled(t) : toolEnabled(t)));
 }
 
 function describeBuiltin(t) {
@@ -2484,8 +3975,13 @@ function describeBuiltin(t) {
 
 function argSummary(name, args) {
   if (name === 'write_file') return `${args.path} (${typeof args.content === 'string' ? args.content.length : 0} chars${args.append ? ', append' : ''})`;
-  if (name === 'clipboard_write' || name === 'type_in_app') return `(${typeof args.text === 'string' ? args.text.length : 0} chars)${typeof args.window === 'string' ? ` into ${args.window}` : ''}`;
+  if (name === 'clipboard_write' || name === 'type_in_app' || name === 'app_write_text')
+    return `(${typeof args.text === 'string' ? args.text.length : 0} chars${name === 'app_write_text' ? `, ${args.mode || 'replace'}` : ''})${typeof args.window === 'string' ? ` into ${args.window}` : ''}`;
   if (name === 'send_keys') return `${args.keys}${typeof args.window === 'string' ? ` to ${args.window}` : ''}`;
+  if (name === 'terminal_send') return terminalInputSummary(args);
+  if (name === 'run_applescript' || name === 'run_powershell') return `(${typeof args.script === 'string' ? args.script.length : 0} chars) ${String(args.script ?? '').replace(/\s+/g, ' ').slice(0, 160)}`;
+  if (name === 'app_read_text') return typeof args.window === 'string' ? `from ${args.window}` : '(focused window)';
+  if (name.startsWith('terminal_') && name !== 'terminal_open') return String(args.id ?? '');
   const v = args.command ?? args.path ?? args.target ?? args.name_or_path ?? args.title_or_id ?? (Object.keys(args).length ? JSON.stringify(args) : '');
   const s = String(v).replace(/\s+/g, ' ');
   return s.length > 200 ? `${s.slice(0, 200)}…` : s;
@@ -3002,7 +4498,8 @@ async function dispatch(msg, signal, remote = false) {
           serverInfo: { name: NAME, title: 'Agent Automation companion', version: VERSION },
           instructions:
             `These tools act directly on the user's own computer (${osName()}, user "${userName()}", home folder ${HOME}). ` +
-            'Paths may start with ~. Prefer read_file, list_directory and find_files to shell commands for looking at files, and confirm before deleting or overwriting anything important.',
+            'Paths may start with ~. Prefer read_file, list_directory and find_files to shell commands for looking at files, and confirm before deleting or overwriting anything important.' +
+            (config.allowShell ? ' For work that takes several steps in a shell or an interactive program (REPL, ssh, database client), open a terminal session once (terminal_open) and continue it with terminal_send.' : ''),
         });
       case 'ping':
         return rpcReply(id, {});
@@ -3502,6 +4999,34 @@ function llmServerLabel(name, target) {
   return known || `The model server "${name}"`;
 }
 
+// CORS for the model proxy only, so any OpenAI-compatible chat app (also web apps) can use it: the token is the
+// protection there, and no cookies are involved. Every other endpoint sends no CORS headers at all.
+const LLM_CORS_HEADERS = 'Authorization, Content-Type, Accept, OpenAI-Organization, X-Requested-With';
+
+function llmPreflightHeaders(req) {
+  // Browser SDKs add their own headers (x-stainless-*, OpenAI-Project, …): allow what the preflight asks for too.
+  const asked = String(req.headers['access-control-request-headers'] || '')
+    .split(',')
+    .map((h) => h.trim())
+    .filter((h) => /^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,100}$/.test(h));
+  const base = LLM_CORS_HEADERS.split(', ');
+  const extra = [...new Set(asked.filter((h) => !base.some((b) => b.toLowerCase() === h.toLowerCase())))].slice(0, 50);
+  return {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': [...base, ...extra].join(', '),
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Max-Age': '600',
+    Vary: 'Origin',
+  };
+}
+
+// What /llm/<name> answers when the model server itself has nothing at its base URL.
+const llmIndex = (name) => ({
+  ok: true,
+  name,
+  endpoints: ['models', 'chat/completions', 'completions', 'embeddings'].map((p) => `/llm/${name}/${p}`),
+});
+
 // /llm/<name>/<rest> → llmUpstreams[name].url + /<rest>, streamed both ways (server-sent events pass straight through).
 function handleLlm(req, res, remote) {
   const m = /^\/llm\/([^/?#]*)(\/[^?#]*)?(\?[^#]*)?/.exec(req.url || '');
@@ -3512,10 +5037,14 @@ function handleLlm(req, res, remote) {
   const up = name && Object.hasOwn(config.llmUpstreams, name) ? config.llmUpstreams[name] : null;
   if (!up) {
     const names = Object.keys(config.llmUpstreams);
-    return send(res, 404, { error: `No model server called "${name}" is set up in the companion. ${names.length ? `Set up: ${names.join(', ')}.` : 'None are set up yet: choose them in Settings → Remote access.'}` });
+    const set = names.length ? `Set up: ${names.join(', ')}.` : 'None are set up yet: choose them in Settings → Remote access.';
+    return send(res, 404, { error: name ? `No model server called "${name}" is set up in the companion. ${set}` : `Use /llm/<name>/… with the name of a model server. ${set}` });
   }
-  const rest = m[2] || '';
+  let rest = m[2] || '';
   if (/(^|\/)(\.|%2e){1,2}(\/|$)/i.test(rest)) return send(res, 400, { error: 'The path must not contain "." or ".." segments.' });
+  // Apps build URLs differently: with a base URL ending in /v1, "/llm/x/v1/models" and "/llm/x/models" mean the same.
+  if (/\/v1$/i.test(new URL(up.url).pathname) && /^\/v1(\/|$)/i.test(rest)) rest = rest.slice(3);
+  const atRoot = rest === '' || rest === '/';
   const target = new URL(up.url + rest + (m[3] || ''));
   const label = llmServerLabel(name, target);
   const headers = {};
@@ -3544,8 +5073,14 @@ function handleLlm(req, res, remote) {
   // Socket idle time, so a long but steady stream never times out.
   upReq.setTimeout(LLM_IDLE_TIMEOUT_MS, () => upReq.destroy(Object.assign(new Error('idle timeout'), { code: 'IDLE_TIMEOUT' })));
   upReq.on('response', (upRes) => {
+    if (atRoot && upRes.statusCode === 404) {
+      upRes.resume();
+      return send(res, 200, llmIndex(name));
+    }
     const out = {};
     for (const [k, v] of Object.entries(upRes.headers)) if (!HOP_HEADERS.has(k) && !k.startsWith('access-control-')) out[k] = v;
+    // The CORS headers set in route() stay; Vary keeps the model server's own values.
+    if (out.vary && !/(^|,)\s*(origin|\*)\s*(,|$)/i.test(out.vary)) out.vary = `${out.vary}, Origin`;
     res.writeHead(upRes.statusCode || 502, out);
     res.flushHeaders?.();
     upRes.pipe(res);
@@ -3613,7 +5148,7 @@ function noteAuthFailure(ip) {
   e.count++;
   if (e.count >= AUTH_FAIL_LIMIT && !e.blockedUntil) {
     e.blockedUntil = now + AUTH_BLOCK_MS;
-    warn(`Blocked ${ip} for ${AUTH_BLOCK_MS / 60000} minutes after ${AUTH_FAIL_LIMIT} requests with a wrong token through the tunnel.`);
+    warn(`Blocked ${ip} for ${AUTH_BLOCK_MS / 60000} minutes after ${AUTH_FAIL_LIMIT} requests with a wrong token${ip.startsWith('origin ') ? ' from that web page' : ' through the tunnel'}.`);
   }
   authFailures.delete(ip);
   authFailures.set(ip, e);
@@ -3627,6 +5162,17 @@ function remoteRefusal(pathname, method) {
   if (pathname === '/llm' || pathname.startsWith('/llm/')) return config.tunnel.exposeLlm ? null : 'Local models are not shared through the tunnel (turn on "Expose local models" in Settings → Remote access).';
   if (pathname === '/mcp') return config.tunnel.exposeMcp ? null : 'Computer tools are not shared through the tunnel (turn on "Expose computer tools" in Settings → Remote access).';
   return `${pathname} can only be used on this computer, not through the tunnel.`;
+}
+
+// The tunnel link opened in a browser, or given to an app as its base URL ("<link>/v1/models"): instead of a bare
+// refusal, say where the model API is. Nothing secret is in it; the token is still needed for /llm/….
+const OPENAI_ROOT_RE = /^\/(?:v1(?:\/.*)?|models|chat\/completions|completions|embeddings|responses|api\/(?:tags|chat|generate|show|version|embed|embeddings))\/?$/;
+function remoteHint(pathname) {
+  const link = tunnelUrl() || 'https://<tunnel link>';
+  const where = `Apps that work with the OpenAI API use ${link}/llm/<name> as the base URL, where <name> is a model server shared in Settings → Remote access, and the companion token as the API key; Settings → Remote access → Use with other apps, on the computer that runs the companion, shows both.`;
+  if (pathname === '/') return `This is the tunnel link of an Agent Automation companion, not a web page. Another copy of the extension connects with the connection code: Settings → Models & providers → Add from connection code. ${where}`;
+  if (OPENAI_ROOT_RE.test(pathname)) return `Not found: ${pathname}. The model API is under /llm/<name>, for example ${link}/llm/<name>/v1/models. ${where}`;
+  return null;
 }
 
 function remoteOriginAllowed(origin) {
@@ -3737,12 +5283,13 @@ async function statusBody() {
     platform: process.platform,
     user: userName(),
     home: HOME,
-    config: { allowShell: config.allowShell, allowWrite: config.allowWrite, commandTimeoutSec: config.commandTimeoutSec },
+    config: { allowShell: config.allowShell, allowWrite: config.allowWrite, commandTimeoutSec: config.commandTimeoutSec, terminalIdleMinutes: config.terminalIdleMinutes },
     tools,
     servers: [...servers.values()].map((s) => s.statusEntry()),
     tunnel: tunnelStatus(),
     remote: { exposeLlm: config.tunnel.exposeLlm, exposeMcp: config.tunnel.exposeMcp, upstreams: Object.keys(config.llmUpstreams) },
     desktop: await desktopStatus(),
+    terminals: terminalStatus(),
   };
 }
 
@@ -3768,8 +5315,11 @@ async function handleConfig(req, res) {
     }
     const prev = config;
     config = next;
+    // Without shell commands the agent can no longer use its terminal sessions, and the extension no longer lists them.
+    if (prev.allowShell && !next.allowShell) closeAllTerminals('shell commands were turned off');
     if ('mcpServers' in patch) reconcileServers(true);
     if ('tunnel' in patch) applyTunnelSettings(prev.tunnel, next.tunnel);
+    if ('terminalIdleMinutes' in patch) scheduleTerminalIdleCheck();
     const changed = Object.keys(patch).map((k) => (k === 'tunnel' && patch.tunnel.namedToken !== prev.tunnel.namedToken ? 'tunnel (token)' : k));
     event(`Settings changed (${changed.join(', ') || 'nothing'}).`);
   });
@@ -3779,7 +5329,7 @@ async function handleConfig(req, res) {
   send(res, 200, await statusBody());
 }
 
-const ENDPOINTS = '/health, /mcp, /status, /config, /tunnel/status, /tunnel/start, /tunnel/stop, /tunnel/connection, /llm/<name>/…';
+const ENDPOINTS = '/health, /mcp, /status, /config, /tunnel/status, /tunnel/start, /tunnel/stop, /tunnel/connection, /terminals/close-all, /llm/<name>/…';
 
 function onlyMethod(req, res, method) {
   if (req.method === method) return true;
@@ -3789,15 +5339,29 @@ function onlyMethod(req, res, method) {
 
 async function route(req, res) {
   const pathname = (req.url || '/').split('?')[0];
+  const isLlmPath = pathname === '/llm' || pathname.startsWith('/llm/');
+  // The model proxy is the only part with CORS; every answer from it carries these two headers.
+  if (isLlmPath) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Vary', 'Origin');
+  }
   if (!hostAllowed(req)) {
     log('WARN', `Refused a request with Host "${req.headers.host}" (possible DNS rebinding).`);
     return send(res, 403, { error: 'Forbidden: the companion only answers requests addressed to 127.0.0.1 or localhost.' });
   }
-  // No CORS at all: browsers can never get a web page's cross-origin request through.
-  if (req.method === 'OPTIONS') return send(res, 403, { error: 'Forbidden: cross-origin requests are not allowed.' });
   const remote = isRemoteRequest(req);
+  if (req.method === 'OPTIONS') {
+    // No CORS outside the model proxy: browsers can never get a web page's cross-origin request through.
+    if (!isLlmPath) return send(res, 403, { error: 'Forbidden: cross-origin requests are not allowed.' });
+    const refusal = remote && remoteRefusal(pathname, 'POST');
+    if (refusal) return send(res, 403, { error: `Forbidden: ${refusal}` });
+    res.writeHead(204, { ...llmPreflightHeaders(req), 'Content-Length': '0' });
+    return res.end();
+  }
   const origin = req.headers.origin;
-  if (origin !== undefined && !(remote ? remoteOriginAllowed(origin) : originAllowed(origin))) {
+  const webOrigin = origin !== undefined && !(remote ? remoteOriginAllowed(origin) : originAllowed(origin));
+  // For the model proxy the Origin check waits until the token is known: with a valid token any origin may use it.
+  if (webOrigin && !isLlmPath) {
     log('WARN', `Refused a ${remote ? 'remote ' : ''}request from origin ${origin}.`);
     return send(res, 403, { error: `Forbidden: requests from web pages (${origin}) are not allowed.` });
   }
@@ -3805,22 +5369,24 @@ async function route(req, res) {
     const refusal = remoteRefusal(pathname, req.method);
     if (refusal) {
       log('WARN', `Refused a remote request to ${pathname} from ${clientIp(req)}.`);
-      return send(res, 403, { error: `Forbidden: ${refusal}` });
+      const hint = remoteHint(pathname);
+      return hint ? send(res, 404, { error: hint }) : send(res, 403, { error: `Forbidden: ${refusal}` });
     }
   }
   if (pathname === '/health') {
     if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, { error: 'Use GET.' }, { Allow: 'GET' });
     return send(res, 200, { ok: true, name: NAME, version: VERSION });
   }
-  const ip = remote ? clientIp(req) : null;
-  if (remote) {
+  // Wrong tokens are counted per client IP through the tunnel, and per web page origin on this computer (so a web
+  // page can only block itself, never the extension).
+  const ip = remote ? clientIp(req) : webOrigin ? `origin ${origin}` : null;
+  if (ip) {
     const wait = authBlockedMs(ip);
     if (wait) return send(res, 429, { error: `Too many requests with a wrong token from ${ip}. Try again in ${Math.ceil(wait / 60000)} minutes.` }, { 'Retry-After': String(Math.ceil(wait / 1000)) });
   }
-  const isLlmPath = pathname === '/llm' || pathname.startsWith('/llm/');
   if (!authorized(req.headers.authorization)) {
-    if (remote) noteAuthFailure(ip);
-    log('WARN', `Refused a ${remote ? `remote request (from ${ip})` : 'request'} to ${pathname} without the right token.`);
+    if (ip) noteAuthFailure(ip);
+    log('WARN', `Refused a ${remote ? `remote request (from ${ip})` : webOrigin ? `request from ${origin}` : 'request'} to ${pathname} without the right token.`);
     return send(
       res,
       401,
@@ -3834,7 +5400,7 @@ async function route(req, res) {
       { 'WWW-Authenticate': 'Bearer' },
     );
   }
-  if (pathname === '/llm' || pathname.startsWith('/llm/')) return handleLlm(req, res, remote);
+  if (isLlmPath) return handleLlm(req, res, remote);
   switch (pathname) {
     case '/mcp':
       return handleMcp(req, res, remote);
@@ -3856,6 +5422,13 @@ async function route(req, res) {
       return send(res, 200, tunnelStatus());
     case '/tunnel/connection':
       return onlyMethod(req, res, 'GET') && send(res, 200, connectionInfo());
+    case '/terminals/close-all': {
+      if (!onlyMethod(req, res, 'POST')) return;
+      await readBody(req, 64 * 1024);
+      const closed = terminals.size;
+      closeAllTerminals('closed from the extension');
+      return send(res, 200, { closed, terminals: terminalStatus() });
+    }
     default:
       return send(res, 404, { error: `Not found: ${pathname}. Endpoints: ${ENDPOINTS}.` });
   }
@@ -4128,9 +5701,10 @@ async function autostart(opts, home) {
 // ---------------------------------------------------------------- main
 
 const USAGE = `Agent Automation companion ${VERSION}
-Gives the Agent Automation browser extension tools for this computer (shell, files,
-clipboard, desktop) and runs local stdio MCP servers for it. It can also open a
-Cloudflare tunnel to share local models with another browser (Settings → Remote access).
+Gives the Agent Automation browser extension tools for this computer (shell, terminal
+sessions, files, clipboard, desktop and applications) and runs local stdio MCP servers
+for it. It can also open a Cloudflare tunnel to share local models with another browser
+(Settings → Remote access).
 
 Usage: node agent-companion.mjs [options]
 
@@ -4214,11 +5788,22 @@ async function shutdown(reason) {
     httpServer?.closeAllConnections?.();
   } catch {}
   for (const c of runningCommands) killTree(c, 'SIGTERM');
+  const shells = closeAllTerminals('the companion is stopping');
+  const shellsGone = (async () => {
+    while (shells.some(pidAlive)) await sleep(50);
+  })();
   const cf = stopTunnel();
   const cfGone = cf && cf.exitCode === null && cf.signalCode === null ? new Promise((r) => cf.once('exit', r)) : null;
-  await waitFor(Promise.all([...[...servers.values()].map((s) => s.stop()), cfGone]), 2700);
+  await waitFor(Promise.all([...[...servers.values()].map((s) => s.stop()), cfGone, shellsGone]), 2700);
   if (cf) killTree(cf, 'SIGKILL');
   for (const c of runningCommands) killTree(c, 'SIGKILL');
+  for (const pid of shells.filter(pidAlive)) {
+    for (const target of [-pid, pid]) {
+      try {
+        process.kill(target, 'SIGKILL');
+      } catch {}
+    }
+  }
   log('INFO', 'Stopped.');
   process.exit(0);
 }

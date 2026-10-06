@@ -48,6 +48,8 @@ export function ensureToolSettings(settings, defaults = {}) {
   const steps = Number(settings.maxSteps ?? 0);
   settings.maxSteps = Number.isFinite(steps) && steps >= 0 ? Math.round(steps) : 0;
   settings.notifications = settings.notifications == null ? defaults.notifications !== false : !!settings.notifications;
+  // Provider ids the user unticked under Remote access, so they are never added to the shared list again by itself.
+  settings.companionUnticked = Array.isArray(settings.companionUnticked) ? [...new Set(settings.companionUnticked.filter((x) => typeof x === 'string' && x))] : [];
 }
 
 /* ---------- pure helpers ---------- */
@@ -509,16 +511,16 @@ function failureText(r, base) {
 
 /* ---------- Computer tools ---------- */
 
-// `hooks` lets the Remote access section follow what this one learns: onStatus(/status body | null when not
-// connected) and onConfig(/config body).
+// `hooks` lets the Remote access section and the Settings home follow what this one learns: onStatus(/status body |
+// null when not connected), onConfig(/config body) and onCheck({ phase, tools, version, healthOk }) after every
+// connection check. Returns { root, recheck(), onShow() }.
+// The page is a guided set-up of five steps: 1 Node.js, 2 run the companion, 3 token and switch, then (once
+// connected) 4 what it may do and 5 local MCP servers. Steps 1–3 fold to one line once they are done.
 export function computerToolsSection(settings, kit, hooks = {}) {
-  const { el, textInput, numberInput, textArea, selectBox, checkbox, button, removeButton, field, checkField, section, onChange, bindSelect, commit } = kit;
+  const { el, textInput, numberInput, textArea, selectBox, checkbox, button, removeButton, field, checkField, onChange, bindSelect, commit, step } = kit;
   const c = settings.companion;
 
-  const root = section(
-    'Computer tools',
-    'Lets the agent use your own computer: run commands, read and write files, use the clipboard and run local MCP servers. This needs a small companion program running on this computer.'
-  );
+  const root = el('div', 'area-body');
   root.id = 'computerTools';
 
   /* --- small builders --- */
@@ -567,51 +569,27 @@ export function computerToolsSection(settings, kit, hooks = {}) {
     };
   };
 
-  /* --- set-up steps --- */
+  /* --- the steps --- */
 
-  const setup = el('details', 'tools-setup');
-  setup.id = 'companionSetup';
-  setup.open = !c.token;
-  const setupBody = el('div', 'tools-setup-body');
-  const steps = el('ol', 'tools-steps');
+  const steps = el('div', 'steps');
+  steps.id = 'companionSetup';
 
-  const step1 = el('li');
-  step1.append('Install Node.js 18 or later (', extLink('https://nodejs.org', 'nodejs.org'), ').');
+  // 1. Node.js (nothing to detect: done once the companion answers, which needs Node.js)
+  const s1 = step({ n: 1, title: 'Install Node.js 18 or later', collapsible: true });
+  s1.root.id = 'companionStep1';
+  const s1Text = el('p', 'step-text-p');
+  s1Text.append('The companion is a small Node.js program. If this computer does not have Node.js yet, get it from ', extLink('https://nodejs.org', 'nodejs.org'), '.');
+  s1.body.append(s1Text);
 
-  const step2 = el('li');
+  // 2. Run the companion
+  const s2 = step({ n: 2, title: 'Run the companion', collapsible: true });
+  s2.root.id = 'companionStep2';
+  const dlLine = el('p', 'step-text-p');
   const dl = repoLink('tools-link', 'agent-companion.mjs', '/releases/latest');
-  if (dl) step2.append('Download ', dl, ' from the latest release.');
-  else step2.append('Download the file agent-companion.mjs from this project’s releases page.');
-
-  const step3 = el('li');
-  step3.append('In a terminal, go to the folder with that file and run:', codeBlock('node agent-companion.mjs', 'Copy command'));
-
-  const step4 = el('li', null, 'Copy the token it prints into the Token field below, and switch Enabled on.');
-
-  steps.append(step1, step2, step3, step4);
-  const autostart = el('div', 'tools-setup-extra');
-  autostart.append(el('p', 'hint', 'Optional: this makes the companion start every time you log in.'), codeBlock('node agent-companion.mjs --install-autostart', 'Copy autostart command'));
-  setupBody.append(steps, autostart);
-  setup.append(el('summary', null, 'Set up'), setupBody);
-  root.append(setup);
-
-  /* --- companion settings (auto-saved) --- */
-
-  const enabled = checkbox(c.enabled);
-  enabled.id = 'companionEnabled';
-  const enabledText = () =>
-    !c.enabled
-      ? 'Off. The agent cannot use computer tools.'
-      : !c.token
-        ? 'On, but there is no token yet. Paste it below, or computer tools stay unavailable.'
-        : 'On. Use Test connection to check that the companion is reachable.';
-  const enabledField = checkField('Enabled', enabled, enabledText());
-  const paintEnabled = () => (enabledField.querySelector('.hint').textContent = enabledText());
-  onChange(enabled, () => {
-    c.enabled = enabled.checked;
-    paintEnabled();
-    if (c.enabled && c.token && !statusData && !busy) connect().catch(() => {});
-  });
+  if (dl) dlLine.append('Download ', dl, ' from the latest release. In a terminal, go to the folder with that file and run:');
+  else dlLine.append('Download the file agent-companion.mjs from this project’s releases page. In a terminal, go to the folder with that file and run:');
+  const runCmd = codeBlock('node agent-companion.mjs', 'Copy command');
+  const keepOpen = el('p', 'hint step-text-p', 'Leave that terminal window open while you use computer tools.');
 
   const url = textInput(c.url, 'url', DEFAULT_URL);
   url.id = 'companionUrl';
@@ -640,6 +618,25 @@ export function computerToolsSection(settings, kit, hooks = {}) {
     connectionChanged();
   });
 
+  const checkBtn = button('Check');
+  checkBtn.id = 'companionCheck';
+  checkBtn.setAttribute('aria-describedby', 'companionHealth');
+  const health = el('div', 'step-status');
+  health.id = 'companionHealth';
+  health.setAttribute('role', 'status');
+  health.hidden = true;
+  const checkRow = el('div', 'tools-actions');
+  checkRow.append(checkBtn);
+
+  const autostart = el('div', 'tools-setup-extra');
+  autostart.append(el('p', 'hint', 'Optional: this makes the companion start every time you log in.'), codeBlock('node agent-companion.mjs --install-autostart', 'Copy autostart command'));
+  s2.body.append(dlLine, runCmd, keepOpen, urlField, checkRow, health, autostart);
+
+  // 3. Token, switch, approval, test
+  const s3 = step({ n: 3, title: 'Paste the token and switch it on', collapsible: true });
+  s3.root.id = 'companionStep3';
+  s3.body.append(el('p', 'step-text-p', 'The companion prints a token when it starts. Paste it here, switch computer tools on, and choose how careful the agent must be.'));
+
   const token = textInput(c.token, 'password', 'Paste the token the companion printed');
   token.id = 'companionToken';
   const tokenField = field('Token', token, 'The companion prints it when it starts. It is stored in this browser only.');
@@ -667,6 +664,35 @@ export function computerToolsSection(settings, kit, hooks = {}) {
     connectionChanged();
   });
 
+  const enabled = checkbox(c.enabled);
+  enabled.id = 'companionEnabled';
+  const enabledText = () =>
+    !c.enabled
+      ? 'Off. The agent cannot use computer tools.'
+      : !c.token
+        ? 'On, but there is no token yet. Paste it in the Token field, or computer tools stay unavailable.'
+        : 'On. Use Test connection to check that the companion is reachable.';
+  const enabledField = checkField('Enabled', enabled, enabledText());
+  const paintEnabled = () => (enabledField.querySelector('.hint').textContent = enabledText());
+  onChange(
+    enabled,
+    () => {
+      c.enabled = enabled.checked;
+      paintEnabled();
+      paintMarks();
+      if (c.enabled && c.token && !statusData && !busy) connect().catch(() => {});
+    },
+    () => {
+      const old = c.enabled;
+      return () => {
+        c.enabled = old;
+        enabled.checked = old;
+        paintEnabled();
+        paintMarks();
+      };
+    }
+  );
+
   const approval = selectBox(APPROVAL_OPTIONS, c.approval);
   approval.id = 'companionApproval';
   const approvalField = field(
@@ -678,13 +704,14 @@ export function computerToolsSection(settings, kit, hooks = {}) {
   caution.classList.add('caution');
   const paintCaution = () => caution.classList.toggle('warn', c.approval === 'follow');
   paintCaution();
-  bindSelect(c, 'approval', approval, paintCaution);
-
-  root.append(enabledField, urlField, tokenField, approvalField);
+  bindSelect(c, 'approval', approval, () => {
+    paintCaution();
+    paintMarks();
+  });
 
   /* --- test connection --- */
 
-  const testBtn = button('Test connection');
+  const testBtn = button('Test connection', 'primary');
   testBtn.id = 'companionTest';
   const testRow = el('div', 'tools-actions');
   testRow.append(testBtn);
@@ -697,7 +724,22 @@ export function computerToolsSection(settings, kit, hooks = {}) {
   resultStatus.setAttribute('role', 'status');
   resultStatus.hidden = true;
   result.append(resultMsg, resultStatus);
-  root.append(testRow, result);
+  s3.body.append(tokenField, enabledField, approvalField, testRow, result);
+
+  // Steps 4 and 5 need a connection; until then they are one muted line each.
+  const later = el('div', 'step-later');
+  later.id = 'companionLater';
+  const l4 = step({ n: 4, title: 'Choose what it may do' });
+  const l5 = step({ n: 5, title: 'Local MCP servers', optional: true });
+  for (const x of [l4, l5]) {
+    x.root.dataset.placeholder = '';
+    x.setOpen(false);
+    x.set({ summary: 'Available once the companion is connected (step 3).' });
+  }
+  later.append(l4.root, l5.root);
+
+  steps.append(s1.root, s2.root, s3.root, later);
+  root.append(steps);
 
   const setResultMsg = (kind, parts, hint) => {
     resultStatus.hidden = true;
@@ -758,13 +800,12 @@ export function computerToolsSection(settings, kit, hooks = {}) {
   allowWrite.id = 'companionAllowWrite';
   const timeout = numberInput('', { min: 1, step: 1, placeholder: 'e.g. 120' });
   timeout.id = 'companionTimeout';
-  const shellField = checkField('Allow shell commands', allowShell, 'Lets the agent run commands on this computer.');
+  const shellField = checkField('Allow shell commands', allowShell, 'Lets the agent run commands on this computer. Also needed for terminal sessions and the AppleScript/PowerShell tools.');
   const writeField = checkField('Allow writing files', allowWrite, 'Lets the agent create, change and overwrite files. Without this it can only read.');
   const timeoutField = field('Command timeout (seconds)', timeout, 'A command that runs longer than this is stopped.');
   const setTimeoutError = withError(timeoutField, timeout);
 
-  const serversTitle = el('h4', 'tools-sub', 'Local MCP servers (stdio)');
-  const serversHint = el('p', 'hint', 'Programs the companion starts and talks to, for example npx running an MCP server. Their tools appear to the agent alongside the built-in ones.');
+  const serversHint = el('p', 'hint', 'Programs the companion starts and talks to over stdio, for example npx running an MCP server. Their tools appear to the agent alongside the built-in ones.');
   const serverList = el('div', 'cards');
   serverList.id = 'companionServers';
   const serversMsg = msgBox('companionServersMsg');
@@ -796,6 +837,8 @@ export function computerToolsSection(settings, kit, hooks = {}) {
   );
 
   const applyBar = el('div', 'tools-apply');
+  applyBar.id = 'companionApplyBar';
+  applyBar.hidden = true;
   const dirtyHint = el('div', 'tools-dirty', 'Unsaved changes. They take effect when you click Apply.');
   dirtyHint.id = 'companionDirty';
   dirtyHint.setAttribute('role', 'status');
@@ -811,19 +854,11 @@ export function computerToolsSection(settings, kit, hooks = {}) {
   const applyMsg = msgBox('companionApplyMsg');
   applyBar.append(dirtyHint, applyButtons, applyMsg);
 
-  editor.append(
-    el('h4', 'tools-sub', 'Commands and files'),
-    shellField,
-    writeField,
-    timeoutField,
-    serversTitle,
-    serversHint,
-    serverList,
-    serversMsg,
-    serverActions,
-    paste,
-    applyBar
-  );
+  editor.append(el('h4', 'tools-sub', 'Commands and files'), shellField, writeField, timeoutField);
+  // Local MCP servers are step 5; like the editor they need the companion's configuration, and Apply covers both.
+  const serversArea = el('div', 'tools-editor');
+  serversArea.id = 'companionServersArea';
+  serversArea.append(serversHint, serverList, serversMsg, serverActions, paste);
   /* --- desktop tools (apps, windows, screenshots, keystrokes): applied at once, not part of Apply --- */
 
   const desk = el('div', 'tools-desktop');
@@ -835,13 +870,16 @@ export function computerToolsSection(settings, kit, hooks = {}) {
   const deskMsg = msgBox('desktopToolsMsg');
   const deskEnv = el('div', 'tools-desktop-env');
   deskEnv.id = 'desktopEnv';
+  const deskNotes = el('div', 'desktop-notes');
+  deskNotes.id = 'desktopNotes';
+  deskNotes.hidden = true;
   const deskAvailLabel = el('div', 'field-label', 'Available tools');
   const deskAvail = el('div', 'desktop-chips');
   deskAvail.id = 'desktopAvailable';
   const deskMissingLabel = el('div', 'field-label', 'Missing helpers');
   const deskMissing = el('div', 'desktop-missing');
   deskMissing.id = 'desktopMissing';
-  desk.append(el('h4', 'tools-sub', 'Desktop tools'), deskSwitch, deskMsg, deskEnv, deskAvailLabel, deskAvail, deskMissingLabel, deskMissing);
+  desk.append(el('h4', 'tools-sub', 'Desktop tools'), deskSwitch, deskMsg, deskEnv, deskNotes, deskAvailLabel, deskAvail, deskMissingLabel, deskMissing);
 
   let deskCfg = null; // desktopTools from /config, once known
   let deskSig = ''; // what the block currently shows
@@ -861,6 +899,8 @@ export function computerToolsSection(settings, kit, hooks = {}) {
     if (sig === deskSig) return;
     deskSig = sig;
     deskEnv.replaceChildren();
+    deskNotes.replaceChildren();
+    deskNotes.hidden = true;
     deskAvail.replaceChildren();
     deskMissing.replaceChildren();
     if (!d) {
@@ -872,12 +912,16 @@ export function computerToolsSection(settings, kit, hooks = {}) {
     hint.hidden = false;
     const plat = PLATFORMS[d.platform] || str(d.platform) || 'unknown platform';
     const session = d.session ? ` · ${SESSIONS[d.session] || str(d.session)} session` : '';
-    deskEnv.textContent = d.platform === 'win32' ? `${plat}: desktop tools are not available on this system yet.` : `${plat}${session}${deskOn.checked ? '' : ' · switched off, so the agent does not see these tools'}`;
+    deskEnv.textContent = `${plat}${session}${deskOn.checked ? '' : ' · switched off, so the agent does not see these tools'}`;
+    // What the companion wants to say about this system (for example that Windows support is untested).
+    const notes = Array.isArray(d.notes) ? d.notes.map(str).filter(Boolean) : [];
+    for (const n of notes) deskNotes.append(el('p', 'hint', n));
+    deskNotes.hidden = !deskNotes.childElementCount;
     const available = Array.isArray(d.available) ? d.available.map(str).filter(Boolean) : [];
     const missing = isObj(d.missing) ? Object.entries(d.missing) : [];
     deskAvailLabel.hidden = deskAvail.hidden = false;
     if (available.length) for (const name of available) deskAvail.append(el('span', 'desktop-chip', name));
-    else deskAvail.append(el('span', 'hint', d.platform === 'win32' ? 'None.' : 'None yet.'));
+    else deskAvail.append(el('span', 'hint', 'None yet.'));
     deskMissingLabel.hidden = deskMissing.hidden = !missing.length;
     for (const [tool, how] of missing) {
       const item = el('div', 'desktop-missing-item');
@@ -906,8 +950,305 @@ export function computerToolsSection(settings, kit, hooks = {}) {
     refresh(run, { statusOnly: true, quiet: true }).catch(() => {});
   });
 
-  manage.append(manageHead, manageMsg, cfgErrorBox, desk, editor);
-  root.append(manage);
+  /* --- terminal sessions (shell sessions the agent keeps open): applied at once, not part of Apply --- */
+
+  const DEFAULT_TERMINAL_IDLE = 30;
+  const TERMINAL_IDLE_ERROR = 'Use a whole number of minutes, from 0 to 1440 (0 = never).';
+  const term = el('div', 'tools-terminals');
+  term.id = 'terminalTools';
+  term.hidden = true;
+  const termOff = el('p', 'hint', 'Terminal sessions need Allow shell commands.');
+  termOff.id = 'terminalOff';
+  const termBody = el('div', 'terminal-body');
+  termBody.id = 'terminalBody';
+  const termMinutes = numberInput('', { min: 0, max: 1440, step: 1, placeholder: String(DEFAULT_TERMINAL_IDLE) });
+  termMinutes.id = 'terminalIdleMinutes';
+  const termField = field('Close idle sessions after (minutes)', termMinutes, 'Whole minutes, 1 to 1440. 0 = never. The default is 30.');
+  const setTermError = withError(termField, termMinutes);
+  const termList = el('div', 'terminal-list');
+  termList.id = 'terminalSessions';
+  termList.setAttribute('role', 'list');
+  termList.setAttribute('aria-label', 'Open terminal sessions');
+  const termNone = el('p', 'hint', 'No open sessions.');
+  termNone.id = 'terminalNone';
+  const termCloseAll = button('Close all', 'danger');
+  termCloseAll.id = 'terminalCloseAll';
+  const termActions = el('div', 'tools-actions');
+  termActions.append(termCloseAll);
+  const termMsg = msgBox('terminalMsg');
+  termBody.append(
+    el('p', 'hint', 'The agent can keep shell sessions open to run several commands in a row. They close by themselves after being idle.'),
+    termField,
+    termList,
+    termNone,
+    termActions,
+    termMsg
+  );
+  term.append(el('h4', 'tools-sub', 'Terminal sessions'), termOff, termBody);
+  // It belongs with the shell switch above it, so it sits at the end of "Commands and files".
+  timeoutField.after(term);
+
+  let termCfg = DEFAULT_TERMINAL_IDLE; // the idle minutes the companion is using, as far as we know
+  let termSig = ''; // what the list currently shows
+  let termSaving = false;
+  let termClosing = false;
+  let termEpoch = 0; // bumped when the address or token changes, so late replies from the old companion are dropped
+  let closeTimer = 0;
+
+  // Two clicks to close every session, like Remove elsewhere: running commands in them are cut off.
+  const resetCloseAll = () => {
+    clearTimeout(closeTimer);
+    closeTimer = 0;
+    termCloseAll.textContent = 'Close all';
+    termCloseAll.classList.remove('confirm');
+  };
+
+  const paintTerminals = () => {
+    term.hidden = !statusData;
+    if (!statusData) {
+      // Another companion (or none): nothing of the old one may linger.
+      termSig = '';
+      termList.replaceChildren();
+      return;
+    }
+    // The companion's live setting, not the unsaved checkbox in the editor: sessions need it to be on right now.
+    const live = typeof statusData.config?.allowShell === 'boolean' ? statusData.config.allowShell : !!baseline?.allowShell;
+    termOff.hidden = live;
+    termBody.hidden = !live;
+    if (!live) {
+      resetCloseAll();
+      hide(termMsg);
+      return;
+    }
+    const mins = statusData.config?.terminalIdleMinutes;
+    if (mins != null && Number.isFinite(Number(mins)) && Number(mins) >= 0) termCfg = Number(mins); // 0 = never, not "unknown"
+    // Do not overwrite what the user is typing, or a value that is waiting to be corrected.
+    if (!termSaving && !termMinutes.hasAttribute('aria-invalid') && document.activeElement !== termMinutes) termMinutes.value = String(termCfg);
+
+    // Older companions have no `terminals`: that just means none.
+    const sessions = Array.isArray(statusData.terminals) ? statusData.terminals.filter(isObj) : [];
+    const rows = sessions.map((t) => {
+      const pid = Number(t.pid);
+      const idle = Number(t.idle);
+      return {
+        id: str(t.id),
+        name: str(t.name) || str(t.id) || 'session',
+        pid: Number.isFinite(pid) ? String(pid) : '?',
+        idle: Number.isFinite(idle) ? Math.max(0, Math.round(idle)) : 0,
+      };
+    });
+    const sig = JSON.stringify(rows);
+    if (sig !== termSig) {
+      termSig = sig;
+      termList.replaceChildren(
+        ...rows.map((t) => {
+          const r = el('div', 'terminal-row');
+          r.setAttribute('role', 'listitem');
+          r.dataset.terminalId = t.id;
+          r.append(el('span', 'terminal-name', t.name), el('span', 'terminal-meta', ` · pid ${t.pid} · idle ${t.idle}s`));
+          return r;
+        })
+      );
+    }
+    termList.hidden = !rows.length;
+    termNone.hidden = !!rows.length;
+    termCloseAll.disabled = termClosing || !rows.length;
+    if (termCloseAll.disabled) resetCloseAll();
+  };
+
+  termMinutes.addEventListener('change', async () => {
+    const t = termMinutes.value.trim();
+    const v = t === '' ? NaN : Number(t);
+    if (!Number.isInteger(v) || v < 0 || v > 1440) {
+      setTermError(TERMINAL_IDLE_ERROR);
+      return;
+    }
+    setTermError('');
+    termMinutes.value = String(v);
+    if (v === termCfg || termSaving) return;
+    const epoch = termEpoch;
+    const hadFocus = document.activeElement === termMinutes;
+    termSaving = true;
+    termMinutes.disabled = true;
+    hide(termMsg);
+    const r = await request(c.url, c.token, 'PUT', '/config', { body: { terminalIdleMinutes: v }, timeout: APPLY_TIMEOUT });
+    termSaving = false;
+    termMinutes.disabled = false;
+    if (hadFocus) termMinutes.focus();
+    if (epoch !== termEpoch) return;
+    if (!r.ok) {
+      termMinutes.value = String(termCfg);
+      show(termMsg, 'error', [`Could not change the idle time. ${failureText(r, c.url)}`]);
+      return;
+    }
+    // The companion may adjust the value (for example clamp it), so prefer what it reports.
+    const reported = r.data?.config?.terminalIdleMinutes;
+    const echoed = reported == null ? NaN : Number(reported);
+    termCfg = Number.isFinite(echoed) && echoed >= 0 ? echoed : v;
+    termMinutes.value = String(termCfg);
+    if (isObj(statusData?.config)) statusData.config.terminalIdleMinutes = termCfg;
+    refresh(run, { statusOnly: true, quiet: true }).catch(() => {});
+  });
+
+  termCloseAll.addEventListener('click', async () => {
+    if (termClosing || termCloseAll.disabled) return;
+    if (!closeTimer) {
+      termCloseAll.textContent = 'Confirm close all';
+      termCloseAll.classList.add('confirm');
+      closeTimer = setTimeout(resetCloseAll, 3000);
+      return;
+    }
+    resetCloseAll();
+    const epoch = termEpoch;
+    const hadFocus = document.activeElement === termCloseAll;
+    termClosing = true;
+    termCloseAll.disabled = true;
+    hide(termMsg);
+    const r = await request(c.url, c.token, 'POST', '/terminals/close-all', { body: {}, timeout: APPLY_TIMEOUT });
+    termClosing = false;
+    if (epoch !== termEpoch) return;
+    if (!r.ok) {
+      show(termMsg, 'error', [`Could not close the sessions. ${failureText(r, c.url)}`]);
+      paintTerminals();
+      return;
+    }
+    const n = Number(r.data?.closed);
+    show(termMsg, 'ok', [Number.isFinite(n) && n >= 0 ? `Closed ${plural(Math.round(n), 'session')}.` : 'Closed all sessions.']);
+    if (isObj(statusData)) statusData.terminals = [];
+    paintTerminals();
+    if (hadFocus) {
+      // The button is now disabled, so keep keyboard users from being dropped at the top of the page.
+      termMsg.tabIndex = -1;
+      termMsg.focus();
+    }
+    refresh(run, { statusOnly: true, quiet: true }).catch(() => {});
+  });
+  termCloseAll.addEventListener('blur', () => closeTimer && resetCloseAll());
+
+  const s4 = step({ n: 4, title: 'Choose what it may do', wide: true });
+  s4.root.id = 'companionStep4';
+  s4.body.append(
+    el('p', 'hint step-text-p', 'Each switch adds or removes tools completely. Desktop tools and terminal settings change at once; shell, files and the timeout change when you click Apply.'),
+    desk,
+    editor
+  );
+  const s5 = step({ n: 5, title: 'Local MCP servers', optional: true, wide: true });
+  s5.root.id = 'companionStep5';
+  s5.body.append(serversArea);
+  manage.append(manageHead, manageMsg, cfgErrorBox, s4.root, s5.root, applyBar);
+  steps.append(manage);
+
+  // The editor, the server list and the Apply bar are only usable with the companion's configuration loaded.
+  let editorShown = false;
+  // The sticky Apply bar shows only when there is something to apply, or the result of the last Apply to read.
+  const paintApplyBar = () => {
+    applyBar.hidden = !editorShown || !(dirty || applying || !applyMsg.hidden);
+  };
+  const showEditor = (v) => {
+    editorShown = !!v;
+    editor.hidden = !v;
+    s5.root.hidden = !v;
+    paintApplyBar();
+  };
+  const showManage = (v) => {
+    manage.hidden = !v;
+    later.hidden = v;
+  };
+
+  /* --- step marks: what is done, what is next --- */
+
+  // idle | checking | down | timeout | notcompanion | notoken | token | forbidden | old | error | ok
+  let phase = 'idle';
+  let healthOk = false; // the companion answered /health
+  let healthVersion = '';
+  // An existing set-up opens folded; the first check then unfolds whatever needs attention.
+  let settlePending = !!(c.enabled && c.token);
+  if (settlePending) for (const x of [s1, s2, s3]) x.setOpen(false);
+  const nTools = () => (Array.isArray(statusData?.tools) ? statusData.tools.length : 0);
+  const DOWN = ['down', 'timeout', 'notcompanion'];
+
+  function paintMarks() {
+    const ok = phase === 'ok';
+    const checking = phase === 'checking';
+    const p2 = DOWN.includes(phase);
+    const p3 = healthOk && !ok && !checking && phase !== 'idle';
+    const cur = phase === 'idle' || checking ? 0 : !healthOk ? 2 : !ok ? 3 : 0;
+    s1.set({ done: healthOk, summary: healthOk ? 'Node.js is installed.' : checking ? 'Checking…' : 'Needed to run the companion.' });
+    s2.set({
+      done: healthOk,
+      current: cur === 2,
+      problem: p2,
+      summary: healthOk ? `Running at ${c.url}${healthVersion ? ` · version ${healthVersion}` : ''}` : checking ? 'Checking…' : p2 ? 'Not answering yet' : '',
+    });
+    s3.set({
+      done: ok,
+      current: cur === 3,
+      problem: p3,
+      summary: ok
+        ? `${c.enabled ? 'On' : 'Off'} · ${plural(nTools(), 'tool')} · ${c.approval === 'follow' ? 'follows the chat’s approval mode' : 'always asks first'}`
+        : checking
+          ? 'Checking…'
+          : p3
+            ? 'Needs attention'
+            : cur === 2
+              ? 'After step 2'
+              : '',
+    });
+    s4.set({ done: ok && !!baseline, current: ok && !baseline });
+    s5.set({ done: ok && drafts.length > 0 });
+  }
+
+  function paintHealth() {
+    const kind = phase === 'checking' ? 'info' : healthOk ? 'ok' : DOWN.includes(phase) ? (phase === 'notcompanion' ? 'error' : 'warn') : '';
+    const text =
+      phase === 'checking'
+        ? 'Checking…'
+        : healthOk
+          ? `✓ Running at ${c.url}${healthVersion ? ` · version ${healthVersion}` : ''}`
+          : phase === 'down'
+            ? `Not running at ${c.url}. Start it with the command above, then click Check.`
+            : phase === 'timeout'
+              ? `${c.url} did not answer in time. Check the address and that the companion is using that port.`
+              : phase === 'notcompanion'
+                ? `Something else answered at ${c.url}. Check the address, including the port.`
+                : '';
+    health.hidden = !text;
+    health.className = `step-status${kind ? ` ${kind}` : ''}`;
+    if (health.textContent !== text) health.textContent = text;
+  }
+
+  // Folds the steps that are done (unless the user is working in one) and unfolds the one that needs attention.
+  function settle() {
+    settlePending = false;
+    for (const x of [s1, s2, s3]) {
+      const done = x.root.dataset.done === 'true';
+      if (done && !x.root.contains(document.activeElement)) x.setOpen(false);
+      else if (!done && x.root.hasAttribute('data-current')) x.setOpen(true);
+    }
+  }
+
+  function setPhase(p, { health: h = null, version = null } = {}) {
+    const prev = phase;
+    phase = p;
+    if (h !== null) healthOk = h;
+    if (version !== null) healthVersion = version;
+    paintMarks();
+    paintHealth();
+    if (p !== prev) {
+      // The step that now needs attention opens by itself.
+      if (DOWN.includes(p)) s2.setOpen(true);
+      else if (healthOk && p !== 'ok' && p !== 'checking' && p !== 'idle') s3.setOpen(true);
+    }
+    if (settlePending && p !== 'checking' && p !== 'idle') settle();
+    try {
+      hooks.onCheck?.({ phase: p, tools: nTools(), version: healthVersion, healthOk });
+    } catch {}
+  }
+  const failPhase = (r, version = healthVersion) =>
+    setPhase(r.status === 401 ? 'token' : r.status === 403 ? 'forbidden' : r.status === 404 ? 'old' : r.net === 'down' ? 'down' : r.net === 'timeout' ? 'timeout' : 'error', {
+      health: !r.net,
+      version,
+    });
 
   /* --- editor state --- */
 
@@ -949,6 +1290,8 @@ export function computerToolsSection(settings, kit, hooks = {}) {
     discardBtn.hidden = !dirty;
     applyBtn.disabled = !dirty || applying || busy;
     manage.dataset.dirty = String(dirty);
+    paintApplyBar();
+    paintMarks();
   };
 
   // Replaces the editor's state with `cfg` (a /config-shaped body) and makes it the new baseline.
@@ -1217,6 +1560,7 @@ export function computerToolsSection(settings, kit, hooks = {}) {
     busyOwner = b ? id : 0;
     busy = b;
     testBtn.disabled = b;
+    checkBtn.disabled = b;
     refreshBtn.disabled = b;
     updateDirty();
   };
@@ -1236,6 +1580,7 @@ export function computerToolsSection(settings, kit, hooks = {}) {
     hooks.onStatus?.(statusData);
     setResultStatus(statusData);
     paintDesktop();
+    setPhase('ok', { health: true });
     if (!statusOnly) {
       const cf = await request(c.url, c.token, 'GET', '/config');
       if (id !== run) return false;
@@ -1248,13 +1593,15 @@ export function computerToolsSection(settings, kit, hooks = {}) {
         configError = cf.ok ? { ...cf, ok: false, bad: true } : cf;
       }
     }
-    manage.hidden = false;
-    editor.hidden = !baseline;
+    showManage(true);
+    showEditor(!!baseline);
+    paintMarks();
     if (baseline) hide(cfgErrorBox);
     else if (configError) {
       const f = explainFailure(configError, { base: c.url, what: 'refresh' });
       show(cfgErrorBox, f.kind, [`Could not read the companion’s configuration. `, ...f.parts], f.hint);
     }
+    paintTerminals();
     repaintStates();
     schedulePoll();
     return true;
@@ -1266,6 +1613,7 @@ export function computerToolsSection(settings, kit, hooks = {}) {
     clearTimeout(pollTimer);
     setBusy(true, id);
     setResultMsg('info', ['Testing the connection…']);
+    setPhase('checking');
     try {
       const h = await request(c.url, c.token, 'GET', '/health');
       if (id !== run) return;
@@ -1273,12 +1621,17 @@ export function computerToolsSection(settings, kit, hooks = {}) {
         hooks.onStatus?.(null);
         const f = explainFailure(h, { base: c.url });
         setResultMsg(f.kind, f.parts, f.hint);
+        // 401/403 come from the companion itself: it runs, but refuses this request.
+        if (h.net) setPhase(h.net === 'timeout' ? 'timeout' : 'down', { health: false, version: '' });
+        else if (h.status === 401 || h.status === 403) setPhase(h.status === 401 ? 'token' : 'forbidden', { health: true, version: '' });
+        else setPhase('notcompanion', { health: false, version: '' });
         return;
       }
       if (!isObj(h.data) || h.data.name !== 'agent-companion') {
         hooks.onStatus?.(null);
         const f = explainFailure({ ok: false, status: h.status, bad: true }, { base: c.url });
         setResultMsg(f.kind, f.parts, f.hint);
+        setPhase('notcompanion', { health: false, version: '' });
         return;
       }
       const version = str(h.data.version);
@@ -1289,12 +1642,15 @@ export function computerToolsSection(settings, kit, hooks = {}) {
           [`The companion${version ? ` (version ${version})` : ''} is running at ${c.url}, but no token is set yet.`],
           'Copy the token it printed when it started into the Token field above, then test again.'
         );
+        setPhase('notoken', { health: true, version });
         return;
       }
+      healthVersion = version;
       const ok = await refresh(id, {
         onFail: (r) => {
           const f = explainFailure(r, { base: c.url, version });
           setResultMsg(f.kind, f.parts, f.hint);
+          failPhase(r, version);
         },
       });
       if (ok) hide(manageMsg);
@@ -1312,6 +1668,14 @@ export function computerToolsSection(settings, kit, hooks = {}) {
     hooks.onStatus?.(null);
     deskCfg = null;
     paintDesktop();
+    termEpoch++;
+    termCfg = DEFAULT_TERMINAL_IDLE;
+    termSig = '';
+    resetCloseAll();
+    termMinutes.value = '';
+    setTermError('');
+    hide(termMsg);
+    paintTerminals();
     baseline = null;
     baselineJson = '';
     configError = null;
@@ -1323,9 +1687,10 @@ export function computerToolsSection(settings, kit, hooks = {}) {
     resultStatus.hidden = true;
     hide(manageMsg);
     hide(applyMsg);
-    manage.hidden = true;
-    editor.hidden = true;
+    showManage(false);
+    showEditor(false);
     updateDirty();
+    setPhase('idle', { health: false, version: '' });
     if (!c.token) return;
     // Saving also refreshes the request-header rules for a new address, so let it finish before the first request.
     const mine = run;
@@ -1335,6 +1700,9 @@ export function computerToolsSection(settings, kit, hooks = {}) {
   }
 
   testBtn.addEventListener('click', () => {
+    connect().catch((e) => setResultMsg('error', [`Unexpected problem: ${e?.message || e}`]));
+  });
+  checkBtn.addEventListener('click', () => {
     connect().catch((e) => setResultMsg('error', [`Unexpected problem: ${e?.message || e}`]));
   });
 
@@ -1350,6 +1718,7 @@ export function computerToolsSection(settings, kit, hooks = {}) {
           showFailure(manageMsg, r, 'refresh');
           const f = explainFailure(r, { base: c.url, what: 'refresh' });
           setResultMsg(f.kind, f.parts, f.hint);
+          failPhase(r);
         },
       });
       if (ok && id === run) show(manageMsg, 'ok', [dirty ? 'Status refreshed. Your unsaved edits were kept.' : 'Refreshed.']);
@@ -1416,12 +1785,14 @@ export function computerToolsSection(settings, kit, hooks = {}) {
         // The reply is a /status body; keep what an older or partial one leaves out.
         const prev = statusData;
         statusData = { ...live };
-        for (const k of ['desktop', 'tunnel', 'remote']) if (statusData[k] === undefined && prev?.[k] !== undefined) statusData[k] = prev[k];
+        for (const k of ['desktop', 'tunnel', 'remote', 'terminals']) if (statusData[k] === undefined && prev?.[k] !== undefined) statusData[k] = prev[k];
         hooks.onStatus?.(statusData);
         setResultStatus(live);
         paintDesktop();
+        setPhase('ok', { health: true });
       }
       loadBaseline(cfg);
+      paintTerminals();
       const servers = live?.servers || [];
       const count = plural(Object.keys(body.mcpServers).length, 'local server');
       const failed = servers.filter((s) => s?.state === 'error').length;
@@ -1449,15 +1820,31 @@ export function computerToolsSection(settings, kit, hooks = {}) {
     if (!baseline) return;
     loadBaseline(baseline);
     hide(applyMsg);
+    paintApplyBar();
     hide(serversMsg);
     show(manageMsg, 'info', ['Changes discarded.']);
     refreshBtn.focus();
   });
 
   // Show the current state right away when it is switched on and configured, so a problem is visible without a click.
+  paintMarks();
   if (c.enabled && c.token) connect().catch(() => {});
 
-  return root;
+  return {
+    root,
+    // A fresh check for the Settings home (not while something else is talking to the companion).
+    recheck() {
+      if (busy || applying || !c.enabled || !c.token) return false;
+      connect().catch(() => {});
+      return true;
+    },
+    // Opening the page folds what is done again.
+    onShow() {
+      if (!(c.enabled && c.token)) return;
+      settlePending = true;
+      if (phase !== 'checking' && phase !== 'idle') settle();
+    },
+  };
 }
 
 /* ---------- Remote access (the companion's Cloudflare tunnel) ---------- */
@@ -1534,19 +1921,56 @@ function setMsg(box, kind, text) {
 }
 
 // Returns { root, hooks, refreshProviders }. `hooks` goes to computerToolsSection, which reports the companion's
-// /status and /config; this section only shows while that connection works.
-export function remoteAccessSection(settings, kit) {
-  const { el, selectBox, checkbox, button, textInput, field, checkField, section } = kit;
+// /status and /config; most of this page only shows while that connection works. `options.onTunnel(tunnel | null)`
+// hears every change of the tunnel's state (for the Settings home).
+// The page is a guided flow: 1 computer tools connected, 2 what to share, 3 start the tunnel, 4 use it.
+export function remoteAccessSection(settings, kit, options = {}) {
+  const { el, selectBox, checkbox, button, textInput, field, checkField, step, callout } = kit;
   const c = settings.companion;
 
-  const root = section('Remote access');
+  const root = el('div', 'area-body');
   root.id = 'remoteAccess';
-  const off = el('p', 'hint tunnel-off', 'Connect the companion above to use remote access');
+
+  // The warning that matters most, in two lines.
+  const safety = callout('warn', [
+    'Anyone who has both the link and the access token can use what you share.',
+    'Give the code only to people you trust; stop the tunnel when you are done.',
+  ]);
+  safety.id = 'tunnelSafety';
+
+  const steps = el('div', 'steps');
+  steps.id = 'remoteSteps';
+  const r1 = step({ n: 1, title: 'Connect computer tools', collapsible: true });
+  r1.root.id = 'remoteStep1';
+  const off = el('p', 'step-text-p tunnel-off', 'Remote access runs through the companion, so connect computer tools first.');
   off.id = 'remoteAccessOff';
+  const goComputer = button('Set up computer tools', 'primary');
+  goComputer.id = 'remoteGoComputer';
+  goComputer.addEventListener('click', () => kit.navigate?.('computer'));
+  const onLine = el('p', 'step-text-p', 'The companion is connected, so remote access can use it.');
+  onLine.id = 'remoteAccessOn';
+  onLine.hidden = true;
+  r1.body.append(off, goComputer, onLine);
+
   const body = el('div', 'tunnel-body');
   body.id = 'remoteAccessBody';
   body.hidden = true;
-  root.append(off, body);
+  // Steps 2–4 need the connection; until then they are one muted line each.
+  const later = el('div', 'step-later');
+  later.id = 'remoteLater';
+  for (const [n, t] of [
+    [2, 'Choose what to share'],
+    [3, 'Start the tunnel'],
+    [4, 'Use it'],
+  ]) {
+    const x = step({ n, title: t });
+    x.root.dataset.placeholder = '';
+    x.setOpen(false);
+    x.set({ summary: 'Available once computer tools are connected (step 1).' });
+    later.append(x.root);
+  }
+  steps.append(r1.root, body, later);
+  root.append(safety, steps);
 
   let connected = false;
   let tunnel = null; // normalised tunnel object
@@ -1565,24 +1989,22 @@ export function remoteAccessSection(settings, kit) {
   let pollTimer = 0;
   let connRun = 0;
   let connLoading = false;
+  let connLlm = {}; // llm map of the last good /tunnel/connection: model name -> its address
+  const shownKeys = new Set(); // models whose API key is currently revealed
+  let appsSig = '';
+  let autoTried = false; // the one automatic fill of the model list was attempted
+  let autoBusy = false;
 
   /* --- layout --- */
 
-  const intro = el('p', 'hint tunnel-intro', 'Use your local models and this computer’s tools from another browser or device. The companion opens a Cloudflare tunnel for you.');
-
-  const safety = el('div', 'tunnel-safety');
-  safety.id = 'tunnelSafety';
   const privateCopy = el(
     'p',
-    null,
+    'hint tunnel-private',
     'The tunnel runs from the companion’s own private copy of cloudflared, with its own configuration. It does not touch any other Cloudflare setup on this computer: no shared config, services or accounts are changed.'
   );
   privateCopy.dataset.role = 'private-copy';
-  safety.append(
-    el('p', null, 'Anyone who has both the link and the access token can use whatever you expose here. Share the connection code only with people and browsers you trust, and stop the tunnel when you are not using it.'),
-    el('p', null, 'A quick tunnel gets a new link every time it starts, so copy the connection code again after a restart.'),
-    privateCopy
-  );
+  const quickNote = el('p', 'hint tunnel-quick', 'A quick tunnel gets a new link every time it starts, so copy the connection code again after a restart.');
+  quickNote.id = 'tunnelQuickNote';
 
   const stateRow = el('div', 'tunnel-state');
   stateRow.id = 'tunnelState';
@@ -1634,10 +2056,34 @@ export function remoteAccessSection(settings, kit) {
   const codeBtns = el('div', 'codeblock-btns');
   codeBtns.append(showCode, copyCode);
   codeRow.append(codeText, codeBtns);
+  const noModels = el('div', 'tools-msg warn tunnel-no-models');
+  noModels.id = 'tunnelNoModels';
+  noModels.setAttribute('role', 'status');
+  noModels.hidden = true;
   codeBlock.append(
     el('div', 'field-label', 'Connection code'),
     codeRow,
-    el('p', 'hint tunnel-code-note', 'In the other browser: Settings → Providers → Add from connection code. Treat the code like a password: it includes the access token.')
+    noModels,
+    el('p', 'hint tunnel-code-note', 'For another copy of this extension: in that browser, Settings → Models & providers → Add from connection code. Treat the code like a password: it includes the access token.')
+  );
+
+  // "Use with other apps": the values to type into anything that speaks the OpenAI API.
+  const apps = el('div', 'tunnel-apps');
+  apps.id = 'remoteApps';
+  apps.hidden = true;
+  const appRows = el('div', 'tunnel-app-rows');
+  const curlHolder = el('div', 'tunnel-curl-holder');
+  const curl = el('details', 'tools-setup tunnel-curl');
+  curl.id = 'remoteAppsCurl';
+  const curlBody = el('div', 'tools-setup-body');
+  curlBody.append(el('p', 'hint', 'Replace $TOKEN with the API key shown above. This lists the models of the first row.'), curlHolder);
+  curl.append(el('summary', null, 'curl example'), curlBody);
+  apps.append(
+    el('h4', 'tools-sub', 'Use with other apps'),
+    el('p', 'hint', 'Any app that works with the OpenAI API can use the models you share: enter these three values in its settings.'),
+    appRows,
+    curl,
+    el('p', 'hint', 'In another copy of this extension, use Add from connection code instead.')
   );
   const setRevealed = (on) => {
     revealed = on;
@@ -1663,8 +2109,7 @@ export function remoteAccessSection(settings, kit) {
   mcpHint.classList.add('caution');
   const optAuto = checkField('Start tunnel when the companion starts', autostart, 'The companion opens the tunnel by itself each time it starts.');
   const optionsMsg = newMsg(el, 'tunnelOptionsMsg');
-  const opts = el('div', 'tunnel-opts');
-  opts.append(optLlm, optMcp, optAuto, optionsMsg);
+  const autoMsg = newMsg(el, 'tunnelAutostartMsg');
 
   // Which local models.
   const upWrap = el('div', 'tunnel-upstreams');
@@ -1672,16 +2117,21 @@ export function remoteAccessSection(settings, kit) {
   const upList = el('div', 'tunnel-upstream-list');
   const upEmpty = el('p', 'hint', 'No local model providers to list. Providers whose address is on this computer or your local network (for example LM Studio or Ollama) show up here.');
   const upOther = el('p', 'hint');
+  const autoNote = el('div', 'tools-msg tunnel-auto-note', "Your local models were added to the list; untick any you don't want to share.");
+  autoNote.id = 'tunnelAutoNote';
+  autoNote.setAttribute('role', 'status');
+  autoNote.hidden = true;
   upWrap.append(
     el('h4', 'tools-sub', 'Expose these local models'),
     el('p', 'hint', 'Only the models ticked here can be reached through the tunnel, and only while “Expose local models” is on.'),
+    autoNote,
     upList,
     upEmpty,
     upOther
   );
 
   // Named tunnel (advanced).
-  const adv = el('details', 'tools-setup tunnel-advanced');
+  const adv = el('details', 'advanced tunnel-advanced');
   adv.id = 'tunnelAdvanced';
   const advBody = el('div', 'tools-setup-body tunnel-advanced-body');
   const kind = selectBox(
@@ -1720,6 +2170,7 @@ export function remoteAccessSection(settings, kit) {
   advActions.append(saveNamed);
   const advMsg = newMsg(el, 'tunnelAdvancedMsg');
   advBody.append(
+    el('h4', 'tools-sub', 'Named tunnel'),
     el('p', 'hint', 'A quick tunnel needs no account but gets a new link every time it starts. A named tunnel keeps one fixed link.'),
     field('Tunnel type', kind, 'Applies when you click Save. A running tunnel restarts with it.'),
     namedField,
@@ -1728,9 +2179,54 @@ export function remoteAccessSection(settings, kit) {
     advActions,
     advMsg
   );
-  adv.append(el('summary', null, 'Advanced: named tunnel'), advBody);
+  adv.append(el('summary', null, 'Advanced'), advBody);
 
-  body.append(intro, safety, stateRow, cfLine, actions, tunnelMsg, codeNote, linkBlock, codeBlock, opts, upWrap, adv);
+  const r2 = step({ n: 2, title: 'Choose what to share', collapsible: true });
+  r2.root.id = 'remoteStep2';
+  r2.body.append(el('p', 'hint step-text-p', 'Your local models are shared automatically; untick any you do not want to share.'), optLlm, upWrap, optMcp, optionsMsg);
+  const r3 = step({ n: 3, title: 'Start the tunnel' });
+  r3.root.id = 'remoteStep3';
+  r3.body.append(stateRow, cfLine, actions, tunnelMsg, optAuto, autoMsg, privateCopy);
+  const r4 = step({ n: 4, title: 'Use it' });
+  r4.root.id = 'remoteStep4';
+  r4.body.append(codeNote, linkBlock, codeBlock, quickNote, apps);
+  body.append(r2.root, r3.root, r4.root, adv);
+
+  let lastConnected = null;
+  let lastReported = '';
+  let lastShared = null;
+  // Opening the page with a working set-up (something shared, tunnel running) folds step 2 to one line, once.
+  let settle2 = true;
+  function paintSteps() {
+    const t = tunnel || normalizeTunnel({});
+    const names = llmOn() ? Object.keys(upstreams) : [];
+    const shared = names.length > 0 || exposeMcp.checked;
+    const running = t.state === 'running';
+    const done = [connected, connected && shared, connected && running, connected && running && !!code];
+    const cur = done.indexOf(false);
+    r1.set({ done: connected, current: cur === 0, summary: connected ? 'The companion is connected.' : '' });
+    // Step 1 has nothing to change once it is done, so it folds (and unfolds when the connection goes).
+    if (lastConnected !== connected) r1.setOpen(!connected);
+    lastConnected = connected;
+    const what = [names.length ? names.join(', ') : '', exposeMcp.checked ? 'computer tools' : ''].filter(Boolean).join(' and ');
+    r2.set({ done: done[1], current: cur === 1, summary: what ? `Sharing ${what}` : 'Nothing is shared yet' });
+    if (connected && configKnown && tunnel) {
+      if (settle2) {
+        settle2 = false;
+        if (done[1] && running && !r2.root.contains(document.activeElement)) r2.setOpen(false);
+      } else if (lastShared && !done[1]) r2.setOpen(true); // nothing shared any more: show the choices again
+      lastShared = done[1];
+    }
+    r3.set({ done: done[2], current: cur === 2, problem: t.state === 'error' });
+    r4.set({ done: done[3], current: cur === 3 });
+    const sig = connected ? t.state : '-';
+    if (sig !== lastReported) {
+      lastReported = sig;
+      try {
+        options.onTunnel?.(connected ? t : null);
+      } catch {}
+    }
+  }
 
   /* --- painting --- */
 
@@ -1738,6 +2234,14 @@ export function remoteAccessSection(settings, kit) {
     const show = !!code && tunnel?.state === 'running';
     setHidden(codeBlock, !show);
     setHidden(codeNote, show || connLoading);
+    const none = exposedNames().length === 0;
+    setHidden(noModels, !show || !none);
+    setText(
+      noModels,
+      llmOn()
+        ? 'No models are shared yet — tick one under Expose these local models.'
+        : 'No models are shared yet — turn on Expose local models and tick one under Expose these local models.'
+    );
     setText(codeText, show ? (revealed ? code : MASKED_CODE) : '');
     setDisabled(showCode, connLoading);
     setDisabled(copyCode, connLoading);
@@ -1783,7 +2287,103 @@ export function remoteAccessSection(settings, kit) {
     setHidden(linkBlock, !(t.state === 'running' && t.url));
     setText(urlText, t.state === 'running' && t.url ? t.url : '');
     paintCode();
+    paintApps();
+    paintSteps();
     syncWatch();
+  }
+
+  const llmOn = () => exposeLlm.checked;
+  // Names of the models other computers can reach: the companion's list, while "Expose local models" is on.
+  const exposedNames = () => (llmOn() ? Object.keys(upstreams) : []);
+
+  const addrOf = (name, link) => {
+    const given = typeof connLlm[name] === 'string' ? httpUrl(connLlm[name]) : null;
+    return given && given.origin === httpUrl(link)?.origin ? normUrl(given.href) : `${link}/llm/${encodeURIComponent(name)}`;
+  };
+
+  function appRow(name, link) {
+    const url = addrOf(name, link);
+    const row = el('div', 'remote-app');
+    row.dataset.upstream = name;
+
+    const urlField = el('div', 'remote-app-field');
+    const urlLine = el('div', 'codeblock');
+    const urlCode = el('code', 'codeblock-text', url);
+    urlCode.dataset.role = 'app-url';
+    const copyUrlBtn = button('Copy');
+    copyUrlBtn.dataset.role = 'app-copy-url';
+    copyUrlBtn.setAttribute('aria-label', `Copy base URL of ${name}`);
+    wireCopy(copyUrlBtn, () => url, () => urlCode);
+    urlLine.append(urlCode, copyUrlBtn);
+    // The proxy appends the rest of the path to the local server's own address, which usually ends in /v1 already.
+    const hasV1 = /\/v1\/?$/i.test(str(upstreams[name]?.url));
+    urlField.append(
+      el('div', 'field-label', 'Base URL'),
+      urlLine,
+      el('p', 'hint', hasV1 ? 'This already ends in the local server’s /v1, so apps that ask for a /v1 address can use it as it is.' : 'Add /v1 at the end if the app expects it.')
+    );
+
+    const keyField = el('div', 'remote-app-field');
+    const keyLine = el('div', 'codeblock');
+    const keyCode = el('code', 'codeblock-text');
+    keyCode.dataset.role = 'app-key';
+    const showKey = button('Show');
+    showKey.dataset.role = 'app-show-key';
+    const copyKey = button('Copy');
+    copyKey.dataset.role = 'app-copy-key';
+    copyKey.setAttribute('aria-label', `Copy API key for ${name}`);
+    const paintKey = () => {
+      const on = shownKeys.has(name);
+      keyCode.textContent = on ? c.token : '••••';
+      showKey.textContent = on ? 'Hide' : 'Show';
+      showKey.setAttribute('aria-pressed', String(on));
+      showKey.setAttribute('aria-label', `${on ? 'Hide' : 'Show'} API key for ${name}`);
+    };
+    showKey.addEventListener('click', () => {
+      if (shownKeys.has(name)) shownKeys.delete(name);
+      else shownKeys.add(name);
+      paintKey();
+    });
+    wireCopy(copyKey, () => c.token, () => keyCode, () => {
+      shownKeys.add(name);
+      paintKey();
+    });
+    paintKey();
+    const keyBtns = el('div', 'codeblock-btns');
+    keyBtns.append(showKey, copyKey);
+    keyLine.append(keyCode, keyBtns);
+    keyField.append(el('div', 'field-label', 'API key'), keyLine, el('p', 'hint', 'The companion’s access token. Treat it like a password.'));
+
+    const modelField = el('div', 'remote-app-field');
+    modelField.append(
+      el('div', 'field-label', 'Model'),
+      el('p', 'hint', 'As listed in the app’s model picker after you enter the URL and key (the same ids as in LM Studio or Ollama).')
+    );
+    modelField.dataset.role = 'app-model';
+
+    row.append(el('div', 'remote-app-name', name), urlField, keyField, modelField);
+    return row;
+  }
+
+  // Rebuilt only when what it shows changes, so the 10-second check of a running tunnel leaves it alone.
+  function paintApps() {
+    const link = tunnel?.state === 'running' && tunnel.url ? normUrl(tunnel.url) : '';
+    const names = link ? exposedNames() : [];
+    const show = !!link && names.length > 0;
+    setHidden(apps, !show);
+    const sig = show ? JSON.stringify([link, names.map((n) => [n, upstreams[n]?.url ?? '', connLlm[n] ?? ''])]) : '';
+    if (sig === appsSig) return;
+    appsSig = sig;
+    if (!show) {
+      appRows.replaceChildren(); // the API key must not linger in the page
+      curlHolder.replaceChildren();
+      shownKeys.clear();
+      return;
+    }
+    for (const n of [...shownKeys]) if (!names.includes(n)) shownKeys.delete(n);
+    appRows.replaceChildren(...names.map((n) => appRow(n, link)));
+    const first = names[0];
+    curlHolder.replaceChildren(makeCodeBlock(kit, `curl -H "Authorization: Bearer $TOKEN" ${addrOf(first, link)}/models`, 'Copy curl example'));
   }
 
   function paintToken() {
@@ -1891,6 +2491,7 @@ export function remoteAccessSection(settings, kit) {
     if (my !== connRun) return;
     connLoading = false;
     code = r.ok && isObj(r.data) && typeof r.data.code === 'string' ? r.data.code : '';
+    connLlm = r.ok && isObj(r.data) && isObj(r.data.llm) ? r.data.llm : {};
     if (code && tunnel && typeof r.data.url === 'string' && /^https?:\/\//i.test(r.data.url) && normUrl(r.data.url) !== normUrl(tunnel.url)) {
       tunnel = { ...tunnel, url: normUrl(r.data.url) };
     }
@@ -1921,6 +2522,7 @@ export function remoteAccessSection(settings, kit) {
     tunnel = t;
     if (t.state !== 'running') {
       code = '';
+      connLlm = {};
       revealed = false;
       connRun++;
       connLoading = false;
@@ -2031,27 +2633,34 @@ export function remoteAccessSection(settings, kit) {
     if (isObj(r.data) && hasTunnelShape(r.data.tunnel)) applyTunnel(normalizeTunnel(r.data.tunnel));
   };
 
-  const wireOption = (input, key) =>
+  const wireOption = (input, key, box = optionsMsg) =>
     input.addEventListener('change', async () => {
       const want = input.checked;
       input.disabled = true;
+      // A new attempt replaces whatever an earlier one said, wherever that was shown.
       setMsg(optionsMsg, '', '');
+      setMsg(autoMsg, '', '');
       if (input === exposeMcp) setMcpWarn();
       const r = await putConfig({ tunnel: { [key]: want } });
       input.disabled = false;
       if (!r.ok) {
         input.checked = !want;
         if (input === exposeMcp) setMcpWarn();
-        setMsg(optionsMsg, 'error', `Could not change that setting. ${failureText(r, c.url)}`);
+        setMsg(box, 'error', `Could not change that setting. ${failureText(r, c.url)}`);
         return;
       }
       tunnelCfg[key] = want;
       followTunnel(r);
+      paint();
+      if (key === 'exposeLlm' && want) {
+        autoTried = false; // turned on by the user: an empty list may be filled once more
+        if (await autoFillUpstreams()) return; // it refreshed the code itself
+      }
       if (key !== 'autostart') refreshConnection(); // the code lists what is exposed
     });
   wireOption(exposeLlm, 'exposeLlm');
   wireOption(exposeMcp, 'exposeMcp');
-  wireOption(autostart, 'autostart');
+  wireOption(autostart, 'autostart', autoMsg);
 
   // The extension's own providers whose address a tunnel can usefully reach.
   const candidates = () => (settings.providers || []).filter((p) => p && p.type === 'openai' && typeof p.baseUrl === 'string' && isPrivateUrl(p.baseUrl));
@@ -2105,8 +2714,52 @@ export function remoteAccessSection(settings, kit) {
       return;
     }
     upstreams = next;
+    setHidden(autoNote, true);
+    // A provider the user unticks is never ticked for them again; ticking it forgets that.
+    const remembered = settings.companionUnticked.includes(p.id);
+    if (!want && !remembered) {
+      settings.companionUnticked.push(p.id);
+      kit.commit();
+    } else if (want && remembered) {
+      settings.companionUnticked = settings.companionUnticked.filter((x) => x !== p.id);
+      kit.commit();
+    }
     paintOthers();
+    paint();
     refreshConnection();
+  }
+
+  // "Expose local models" is on but the list is empty (nothing would be shared, so the code would have nothing to
+  // add): tick every local provider the user has not unticked before, once. → true when it changed the list.
+  async function autoFillUpstreams() {
+    if (!configKnown || !llmOn() || autoBusy || autoTried || Object.keys(upstreams).length) return false;
+    const skip = new Set(settings.companionUnticked);
+    const next = {};
+    const seen = new Set();
+    for (const p of candidates()) {
+      const key = normUrl(p.baseUrl);
+      if (skip.has(p.id) || seen.has(key)) continue;
+      seen.add(key);
+      next[upstreamName(p, Object.keys(next))] = { url: p.baseUrl.trim() };
+    }
+    if (!Object.keys(next).length) return false;
+    autoTried = true;
+    autoBusy = true;
+    const boxes = [...upList.querySelectorAll('input')];
+    boxes.forEach((b) => (b.disabled = true));
+    const r = await putConfig({ llmUpstreams: next });
+    autoBusy = false;
+    boxes.forEach((b) => (b.disabled = false));
+    if (!r.ok) {
+      setMsg(optionsMsg, 'error', `Could not add your local models to the list. ${failureText(r, c.url)}`);
+      return false;
+    }
+    upstreams = next;
+    renderUpstreams();
+    setHidden(autoNote, false);
+    paint();
+    refreshConnection();
+    return true;
   }
 
   saveNamed.addEventListener('click', async () => {
@@ -2164,19 +2817,25 @@ export function remoteAccessSection(settings, kit) {
   function setStatus(s) {
     connected = isObj(s);
     off.hidden = connected;
+    goComputer.hidden = connected;
+    onLine.hidden = !connected;
     body.hidden = !connected;
+    later.hidden = connected;
     if (!connected) {
       // Whatever was shown belonged to the connection that is gone; the next good /status starts afresh.
       stopPolling();
       tunnel = null;
       code = '';
+      connLlm = {};
       revealed = false;
       connRun++;
       connLoading = false;
       gaveUp = false;
       configKnown = false;
+      autoTried = false;
       upstreams = {};
-      for (const m of [tunnelMsg, optionsMsg, advMsg]) setMsg(m, '', '');
+      for (const m of [tunnelMsg, optionsMsg, autoMsg, advMsg]) setMsg(m, '', '');
+      setHidden(autoNote, true);
       paint();
       renderUpstreams();
       return;
@@ -2216,12 +2875,22 @@ export function remoteAccessSection(settings, kit) {
     paintToken();
     upstreams = isObj(cfg?.llmUpstreams) ? JSON.parse(JSON.stringify(cfg.llmUpstreams)) : {};
     renderUpstreams();
+    paint();
+    autoFillUpstreams().catch(() => {});
   }
 
   renderUpstreams();
   paint();
   paintToken();
-  return { root, hooks: { onStatus: setStatus, onConfig: setConfig }, refreshProviders: renderUpstreams };
+  return {
+    root,
+    hooks: { onStatus: setStatus, onConfig: setConfig },
+    refreshProviders: renderUpstreams,
+    onShow() {
+      settle2 = true;
+      paintSteps();
+    },
+  };
 }
 
 /* ---------- Providers: Add from connection code ---------- */
@@ -2334,8 +3003,11 @@ export function providerCodeControls(settings, kit, { onAdded } = {}) {
     }
     input.value = '';
     syncMcp();
+    // The provider the user just added is the one they want: put it in the header (onAdded saves and tells the panel).
+    const first = r.providers[0];
+    if (first) settings.activeProviderId = first.id;
     onAdded?.(r);
-    const next = r.providers.length ? ' Next: use Test connection on a new provider to load its models.' : '';
+    const next = first ? ` ${first.name} is now selected in the header; its models load automatically.` : '';
     setMsg(msg, 'ok', `Added ${parts.join(' and ')}.${next}${notes.length ? ` ${notes.join(' ')}` : ''}`);
   };
   add.addEventListener('click', run);

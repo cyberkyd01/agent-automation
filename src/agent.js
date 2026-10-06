@@ -29,7 +29,10 @@ Current date: ${new Date().toDateString()}
 - If you are blocked by a login, CAPTCHA or missing information, stop and say what you need.
 - Be concise. Do not narrate every step; report results.`;
   if (computer) {
-    s += `\n\n## The user's computer\nTools prefixed mcp_computer_ act on the user's own computer (shell, files, clipboard, local MCP servers). Use them only when the task calls for something outside the browser, prefer the least powerful tool that does the job, and never run destructive commands the user did not ask for.`;
+    s += `\n\n## The user's computer\nTools prefixed mcp_computer_ act on the user's own computer (shell, files, clipboard, apps, local MCP servers). Use them only when the task calls for something outside the browser, prefer the least powerful tool that does the job, and never run destructive commands the user did not ask for.
+- One-off commands: run_command. Anything stateful or interactive (several steps in one shell, a REPL, ssh, an installer that asks questions): terminal_open once, then terminal_send and read the reply each step (wait_for a prompt or pattern), terminal_interrupt if it hangs, terminal_close when done.
+- Applications: launch_app opens one. To work inside it, prefer scripting over keystrokes: run_applescript on macOS (TextEdit, Excel, Numbers, Terminal, Finder, Mail…), run_powershell with COM on Windows (Excel, Word), app_read_text / app_write_text for any text editor, LibreOffice headless on Linux. Use send_keys, type_in_app and desktop_screenshot only when no scripting route exists, and take a screenshot to verify when you cannot read the result back.
+- Work step by step: act, read the response, then decide the next step; report what you did and what you saw.`;
   }
   if (settings.customPrompt) s += `\n\n## User's custom instructions\n${settings.customPrompt}`;
   return s;

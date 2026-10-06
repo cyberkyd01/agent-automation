@@ -513,7 +513,7 @@ function paginate(text, args, ctx, next) {
 function imageApi(ctx) {
   const cfg = ctx.settings.image || {};
   const p = cfg.providerId && (ctx.settings.providers || []).find((x) => x.id === cfg.providerId);
-  if (!p || !cfg.model) throw new Error('No image model configured. Ask the user to open Settings → Image generation and choose a provider and model.');
+  if (!p || !cfg.model) throw new Error('No image model configured. Ask the user to open Settings → Images and choose a provider and model.');
   return {
     cfg,
     name: p.name || p.id,
