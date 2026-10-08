@@ -279,6 +279,42 @@ function toAnthropic(messages, caps) {
   return { system, messages: out };
 }
 
+/* ---------- reasoning ---------- */
+
+// Qwen soft switch: append ' /think' or ' /no_think' to the model-visible text of the LAST user turn only.
+// Edits a shallow copy (never the original, so the UI `_text` is untouched) and never doubles the token.
+function appendToLastUser(messages, suffix) {
+  if (!suffix) return messages;
+  const token = suffix.trim();
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role !== 'user') continue;
+    const out = messages.slice();
+    if (Array.isArray(m.content)) {
+      const c = m.content.slice();
+      let at = -1;
+      for (let k = c.length - 1; k >= 0; k--) if (c[k].type === 'text') { at = k; break; }
+      if (at >= 0) {
+        if (new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*$').test(c[at].text || '')) return messages;
+        c[at] = { ...c[at], text: (c[at].text || '') + suffix };
+      } else {
+        c.push({ type: 'text', text: token });
+      }
+      out[i] = { ...m, content: c };
+    } else {
+      const text = String(m.content ?? '');
+      if (new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*$').test(text)) return messages;
+      out[i] = { ...m, content: text + suffix };
+    }
+    return out;
+  }
+  return messages;
+}
+
+const ANTHROPIC_BUDGET = { minimal: 1024, low: 2048, medium: 8000, high: 16000 };
+// Model ids that may support extended thinking (claude 3.7 / 4 / opus / sonnet families).
+const THINKABLE = /claude-?3[.\-]?7|claude-?4|opus|sonnet/i;
+
 /* ---------- chat ---------- */
 
 function finishCalls(tcs) {
@@ -289,10 +325,17 @@ function finishCalls(tcs) {
 
 async function openaiChat({ provider, model, messages, tools, settings, signal, onDelta, caps }) {
   const useTools = tools.length > 0;
+  const mode = settings.thinking?.mode || 'auto';
+  const reason = mode === 'on' && !caps.noReason; // request reasoning this turn
+  const isQwen = /qwen/i.test(model || '');
+  // Qwen's soft switch: /think when we ask for reasoning, /no_think when the user turned it off. Never both.
+  const qwenSuffix = reason && isQwen ? ' /think' : mode === 'off' && isQwen ? ' /no_think' : '';
+
   let msgs = messages;
   if (useTools && caps.promptTools) {
     msgs = messages.map((m, i) => (i === 0 && m.role === 'system' ? { ...m, content: m.content + toolPrompt(tools) } : m));
   }
+  if (qwenSuffix) msgs = appendToLastUser(msgs, qwenSuffix);
   const body = { model, messages: toOpenAI(msgs, caps), stream: true };
   if (useTools && !caps.promptTools) {
     body.tools = tools.map((t) => ({
@@ -302,6 +345,7 @@ async function openaiChat({ provider, model, messages, tools, settings, signal, 
   }
   if (settings.temperature !== '' && settings.temperature != null) body.temperature = Number(settings.temperature);
   if (settings.maxTokens) body.max_tokens = Number(settings.maxTokens);
+  if (reason) body.reasoning_effort = settings.thinking?.effort || 'medium';
 
   const res = await doFetch(
     trimSlash(provider.baseUrl) + '/chat/completions',
@@ -387,7 +431,16 @@ async function anthropicChat({ provider, model, messages, tools, settings, signa
     body.tools = tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.parameters }));
     body.tools[body.tools.length - 1].cache_control = { type: 'ephemeral' };
   }
-  if (settings.temperature !== '' && settings.temperature != null) body.temperature = Number(settings.temperature);
+  // Extended thinking: only when asked (mode 'on'), not already given up on (noReason), and the model id looks capable.
+  const useThinking = settings.thinking?.mode === 'on' && !caps.noReason && THINKABLE.test(model || '');
+  if (useThinking) {
+    const budget = ANTHROPIC_BUDGET[settings.thinking?.effort] ?? ANTHROPIC_BUDGET.medium;
+    body.thinking = { type: 'enabled', budget_tokens: budget };
+    body.max_tokens = Math.max(body.max_tokens, budget + 4096); // the API requires max_tokens > budget_tokens
+    // temperature must be unset (or 1) with thinking — omit it entirely.
+  } else if (settings.temperature !== '' && settings.temperature != null) {
+    body.temperature = Number(settings.temperature);
+  }
 
   const res = await doFetch(
     anthropicBase(provider) + '/v1/messages',
@@ -428,7 +481,7 @@ async function anthropicChat({ provider, model, messages, tools, settings, signa
   return { content, reasoning, tool_calls, images: [] };
 }
 
-// caps is a per-model memo ({promptTools, noImages}) so a discovered limitation is only probed once.
+// caps is a per-model memo ({promptTools, noImages, noReason}) so a discovered limitation is only probed once.
 export async function chat(opts) {
   const { provider, settings, messages, tools, caps } = opts;
   for (let attempt = 0; ; attempt++) {
@@ -436,7 +489,10 @@ export async function chat(opts) {
     const eff = {
       promptTools: settings.toolMode === 'prompt' || (settings.toolMode !== 'native' && !!caps.promptTools),
       noImages: settings.vision === 'off' || (settings.vision !== 'on' && !!caps.noImages),
+      noReason: !!caps.noReason,
     };
+    // Reasoning params are only sent when the user turned thinking 'on' and we haven't already given up on them.
+    const sentReason = settings.thinking?.mode === 'on' && !eff.noReason;
     try {
       return await (provider.type === 'anthropic' ? anthropicChat : openaiChat)({ ...opts, caps: eff });
     } catch (e) {
@@ -448,6 +504,10 @@ export async function chat(opts) {
         }
         if (!eff.noImages && settings.vision === 'auto' && messages.some(hasImages) && /image|vision|modal|content/i.test(e.message)) {
           caps.noImages = true;
+          continue;
+        }
+        if (sentReason && /reason|think|unsupported|unknown.*param|extra.*field|budget/i.test(e.message)) {
+          caps.noReason = true;
           continue;
         }
       }

@@ -1127,6 +1127,94 @@ export function renderSettings(container, settings, opts = {}) {
       field('Max output tokens', maxTokens, 'Blank = provider default.')
     );
 
+    /* Thinking: how much the model reasons, and whether the chat shows it. */
+    settings.thinking ??= { mode: 'auto', effort: 'medium', show: true };
+    const th = settings.thinking;
+    th.mode ??= 'auto';
+    th.effort ??= 'medium';
+    th.show ??= true;
+    const thinkMode = selectBox([['auto', 'Auto'], ['on', 'On'], ['off', 'Off']], th.mode);
+    thinkMode.id = 'thinkMode';
+    const thinkEffort = selectBox([['minimal', 'Minimal'], ['low', 'Low'], ['medium', 'Medium'], ['high', 'High']], th.effort);
+    thinkEffort.id = 'thinkEffort';
+    const effortField = field('Effort', thinkEffort, 'How hard a reasoning model should think. More effort is slower.');
+    effortField.id = 'thinkEffortField';
+    const syncEffort = () => {
+      effortField.hidden = thinkMode.value !== 'on';
+    };
+    syncEffort();
+    bindSelect(th, 'mode', thinkMode, syncEffort);
+    bindSelect(th, 'effort', thinkEffort);
+    const thinkShow = checkbox(th.show);
+    thinkShow.id = 'thinkShow';
+    onChange(
+      thinkShow,
+      () => {
+        th.show = thinkShow.checked;
+      },
+      keep(th, 'show', thinkShow, 'checked')
+    );
+    const thinking = card('Thinking', 'Whether the model reasons before it answers, and whether you see it.', { id: 'settingsThinking' });
+    thinking.append(
+      field(
+        'Thinking',
+        thinkMode,
+        'Auto uses the model’s default. On asks reasoning models to think more. Off asks the model to skip visible reasoning (works best on Qwen). Models that can’t do this ignore the setting.'
+      ),
+      effortField,
+      checkField('Show thinking in the chat', thinkShow, 'Only affects what you see; the model still reasons the same.')
+    );
+
+    /* Tools: master switch plus per-group switches. */
+    settings.tools ??= { enabled: true, groups: {} };
+    const tl = settings.tools;
+    tl.enabled ??= true;
+    tl.groups ??= {};
+    const toolsEnabled = checkbox(tl.enabled);
+    toolsEnabled.id = 'toolsEnabled';
+    const groupCtls = [];
+    const syncGroups = () => {
+      for (const g of groupCtls) g.disabled = !toolsEnabled.checked;
+    };
+    onChange(
+      toolsEnabled,
+      () => {
+        tl.enabled = toolsEnabled.checked;
+        syncGroups();
+      },
+      keep(tl, 'enabled', toolsEnabled, 'checked', syncGroups)
+    );
+    const tools = card('Tools', 'What the agent is allowed to do beyond chatting.', { id: 'settingsTools' });
+    tools.append(checkField('Let the agent use tools', toolsEnabled, 'Off makes it a plain chat assistant — no clicking, typing, searching or other tools.'));
+    const groupBox = el('div', 'tool-groups');
+    groupBox.setAttribute('role', 'group');
+    groupBox.setAttribute('aria-labelledby', 'toolGroupsLabel');
+    const groupLabel = el('div', 'field-label', 'What it may use');
+    groupLabel.id = 'toolGroupsLabel';
+    groupBox.append(groupLabel);
+    for (const [key, id, label, desc] of [
+      ['browser', 'toolGroupBrowser', 'Browser & page actions', 'Read, click, type and move around web pages and tabs.'],
+      ['web', 'toolGroupWeb', 'Web search & fetch', 'Search the web and read pages without opening them.'],
+      ['images', 'toolGroupImages', 'Image generation & editing', 'Make or change pictures with your image vendor.'],
+      ['computer', 'toolGroupComputer', 'Computer tools & MCP servers', 'Commands, files and apps on this computer, plus remote MCP servers.'],
+      ['memory', 'toolGroupMemory', 'Memory', 'Save and look up notes that persist between chats.'],
+    ]) {
+      tl.groups[key] ??= true;
+      const cb = checkbox(tl.groups[key]);
+      cb.id = id;
+      cb.disabled = !tl.enabled;
+      onChange(
+        cb,
+        () => {
+          tl.groups[key] = cb.checked;
+        },
+        keep(tl.groups, key, cb, 'checked')
+      );
+      groupCtls.push(cb);
+      groupBox.append(checkField(label, cb, desc));
+    }
+    tools.append(groupBox);
+
     const customPrompt = textArea(settings.customPrompt, { rows: 4, placeholder: 'e.g. Reply in British English. Never submit payment forms.' });
     customPrompt.id = 'settingsCustomPrompt';
     bindText(settings, 'customPrompt', customPrompt);
@@ -1168,7 +1256,7 @@ export function renderSettings(container, settings, opts = {}) {
       )
     );
 
-    root.append(approvals, queue, limits, notif, model, custom, adv.root);
+    root.append(approvals, queue, limits, notif, model, thinking, tools, custom, adv.root);
     return {};
   }
 

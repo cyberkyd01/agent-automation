@@ -604,10 +604,13 @@ function assistantView(s) {
   const thinkBody = el('div', 'think-body');
   think.append(el('summary', null, 'Thinking'), thinkBody);
   think.hidden = true;
+  // "Show thinking in the chat" off: the reasoning block is never added to the message (the answer is unchanged).
+  const showThink = settings?.thinking?.show !== false;
   const body = el('div', 'md');
   body.hidden = true;
   const dots = workingDots();
-  wrap.append(think, body, dots);
+  if (showThink) wrap.append(think);
+  wrap.append(body, dots);
   add(s, wrap);
 
   let latest = { content: '', reasoning: '' };
@@ -619,7 +622,7 @@ function assistantView(s) {
   const render = () => {
     raf = 0;
     const { body: text, think: inlineThink } = splitThink(stripToolCalls(latest.content));
-    const reasoning = [stripToolCalls(latest.reasoning).trim(), inlineThink].filter(Boolean).join('\n\n');
+    const reasoning = showThink ? [stripToolCalls(latest.reasoning).trim(), inlineThink].filter(Boolean).join('\n\n') : '';
     if (reasoning !== shownThink) {
       thinkBody.textContent = reasoning;
       think.hidden = !reasoning;

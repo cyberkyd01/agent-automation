@@ -1813,3 +1813,24 @@ button.step-head:hover {
   gap: 8px;
   margin-top: 12px;
 }
+
+/* Thinking and Tools cards */
+.tool-groups {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border, currentColor);
+  border-top-color: color-mix(in srgb, currentColor 15%, transparent);
+}
+
+.tool-groups .field.check + .field.check {
+  margin-top: 8px;
+}
+
+.tool-groups input:disabled + span,
+.tool-groups input:disabled ~ .hint {
+  opacity: 0.55;
+}
+
+.tool-groups .field.check:has(input:disabled) .hint {
+  opacity: 0.55;
+}

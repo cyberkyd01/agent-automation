@@ -6,7 +6,11 @@ It runs in Chrome, in other Chromium-based browsers (Chromium, Edge, Brave, Oper
 
 **[User guide](docs/USER_GUIDE.md)**: a tour of the panel, step-by-step recipes for common jobs, every setting, and troubleshooting.
 
-Version 1.5 adds:
+Version 1.6 adds:
+
+- **Thinking and tool controls.** Settings → **Behaviour** now has a **Thinking** card (how hard the model reasons, and whether the chat shows it) and a **Tools** card (a master switch and one switch for each kind of tool). See [Thinking and tools](#thinking-and-tools).
+
+Version 1.5 added:
 
 - **Memory.** The agent keeps a short progress note inside each chat, so a long job does not repeat finished items, and it can save lasting facts that carry across chats, for everywhere or for one website. You review and delete what it saved in Settings → **Memory**. See [Memory](#memory).
 
@@ -32,13 +36,13 @@ Requires Chrome 116 or later (or a Chromium-based browser of the same age), or F
 
 ## Install
 
-Pick the download for your browser from the [Releases page](https://github.com/cyberkyd01/agent-automation/releases/latest). Version 1.5.0 has these files:
+Pick the download for your browser from the [Releases page](https://github.com/cyberkyd01/agent-automation/releases/latest). Version 1.6.0 has these files:
 
 | File | For |
 |---|---|
-| `agent-automation-chrome-v1.5.0.zip` | Chrome |
-| `agent-automation-chromium-v1.5.0.zip` | Chromium, Edge, Brave and Opera. It is the same build as the Chrome one, in its own file. |
-| `agent-automation-firefox-v1.5.0.zip` and `agent-automation-firefox-v1.5.0.xpi` | Firefox |
+| `agent-automation-chrome-v1.6.0.zip` | Chrome |
+| `agent-automation-chromium-v1.6.0.zip` | Chromium, Edge, Brave and Opera. It is the same build as the Chrome one, in its own file. |
+| `agent-automation-firefox-v1.6.0.zip` and `agent-automation-firefox-v1.6.0.xpi` | Firefox |
 | `agent-companion.mjs` | Optional: computer tools, terminals, desktop and application tools, and remote access (see [Computer tools](#computer-tools-and-local-mcp-servers-companion)) |
 
 ### Chrome and other Chromium-based browsers
@@ -54,7 +58,7 @@ Chrome only installs `.crx` files that come from the Chrome Web Store, which is 
 
 ### Firefox
 
-1. Download `agent-automation-firefox-v1.5.0.xpi` (or the zip).
+1. Download `agent-automation-firefox-v1.6.0.xpi` (or the zip).
 2. Open `about:debugging#/runtime/this-firefox`.
 3. Click **Load Temporary Add-on…** and pick the `.xpi`. If you built it from source, pick `manifest.json` in `dist/firefox`. The sidebar opens by itself.
 4. The toolbar button, or **Ctrl+Shift+Y** (Mac: **Cmd+Shift+Y**), opens and closes the sidebar. If the shortcut does nothing, set another one in `about:addons` (gear menu, **Manage Extension Shortcuts**).
@@ -114,6 +118,33 @@ Settings opens on a home page. A **Getting started** card at the top has three s
 <img src="docs/images/settings-home.png" alt="The Settings home page: a Getting started card with three numbered steps (Connect a model, Try a task, Optional: computer tools, remote access), then cards for Models & providers (amber pill 'No model chosen'), Images (grey pill 'Off') and Behaviour (blue pill 'Ask before acting · no step limit'), each with an icon and a one-line purpose." width="400">
 
 Click a card to open that area on its own page. **‹ Settings** at the top left goes back to the home page, and **Esc** does the same (on the home page, **Esc** closes Settings). Each page starts with **What this does**, groups its controls into cards, and folds the settings you rarely need under **Advanced** (on Behaviour: temperature, context budget, max tool output, trusted input events; on Remote access: the named tunnel; on Images: a vendor's Base URL). Changes are saved automatically.
+
+## Thinking and tools
+
+Two cards in Settings → **Behaviour** control how the model reasons and what the agent may do. They are saved, apply to all chats, and take effect on the next request.
+
+**Thinking**
+
+| Control | Options | What it does |
+|---|---|---|
+| **Thinking** | **Auto**, **On**, **Off** | **Auto** uses the model's own default. **On** asks reasoning-capable models to think more. **Off** asks the model to skip visible reasoning; this works best on Qwen models. A model that does not support the setting ignores it, and the extension falls back on its own, so nothing breaks. |
+| **Effort** | **Minimal**, **Low**, **Medium**, **High** | Only shown when Thinking is **On**. How hard a reasoning model thinks. Higher is slower and may cost more. |
+| **Show thinking in the chat** | on or off | Whether the collapsible **Thinking** block appears under each answer. It changes only what you see; the model reasons the same either way. |
+
+**Tools**
+
+| Control | What it does |
+|---|---|
+| **Let the agent use tools** | The master switch. Off makes the agent a plain chat assistant: no clicking, typing, searching, images, computer tools or memory, only conversation. |
+| **Browser & page actions**, **Web search & fetch**, **Image generation & editing**, **Computer tools & MCP servers**, **Memory** | One switch for each kind of tool. They are greyed out while the master switch is off. Turning one off removes those tools from the agent for new requests. |
+
+Examples:
+
+- Turn **Thinking** off for faster answers on a reasoning model.
+- Turn **Let the agent use tools** off for a plain chat.
+- Turn **Browser & page actions** off for a research-only chat, or **Computer tools & MCP servers** off when you want to be sure the agent cannot touch your machine, for example on a site you do not trust.
+
+The [user guide](docs/USER_GUIDE.md#behaviour) lists every control.
 
 ## Local models: context window and tool calling
 

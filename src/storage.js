@@ -34,6 +34,12 @@ export const DEFAULTS = {
   maxToolChars: 12000,
   trustedInput: false,
   customPrompt: '',
+  // Model reasoning. mode: 'auto' (provider default, send no knob) | 'on' (request reasoning at `effort`) | 'off'
+  // (ask the model not to think where we can). effort: 'minimal' | 'low' | 'medium' | 'high' (only when mode 'on').
+  // show: render the Thinking block in the chat (pure UI).
+  thinking: { mode: 'auto', effort: 'medium', show: true },
+  // Tool use. enabled:false => send no tools (plain chat). groups: per-category enable (missing => on).
+  tools: { enabled: true, groups: { browser: true, web: true, images: true, computer: true, memory: true } },
   // Local program that gives the agent OS tools; approval: 'ask' (always confirm its tools) | 'follow' (use `approval`).
   companion: { enabled: false, url: 'http://127.0.0.1:8765', token: '', approval: 'ask' },
   // Cross-chat memory: inject saved notes into new runs; maxInjectChars caps how much is injected per run.
@@ -62,6 +68,8 @@ export async function loadSettings() {
     image: { ...base.image, ...migrateImage(settings.image) },
     companion: { ...base.companion, ...settings.companion },
     memory: { ...base.memory, ...settings.memory },
+    thinking: { ...base.thinking, ...settings.thinking },
+    tools: { ...base.tools, ...settings.tools, groups: { ...base.tools.groups, ...(settings.tools?.groups) } },
   };
   if (!settings.stepsV12) {
     if (Number(s.maxSteps) === OLD_DEFAULT_STEPS) s.maxSteps = 0;

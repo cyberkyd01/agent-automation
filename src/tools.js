@@ -647,6 +647,7 @@ function matchTabs(tabs, query) {
 export const TOOLS = [
   {
     name: 'list_tabs',
+    group: 'browser',
     description: 'List open tabs with their ids.',
     parameters: obj({}),
     run: async (args, ctx) => {
@@ -662,6 +663,7 @@ export const TOOLS = [
   },
   {
     name: 'open_tab',
+    group: 'browser',
     description: 'Open a URL in a new tab and make it the current tab.',
     parameters: obj({ url: { type: 'string' }, background: { type: 'boolean', description: "Don't switch the user's view to it" } }, ['url']),
     run: async (args, ctx) => {
@@ -674,6 +676,7 @@ export const TOOLS = [
   },
   {
     name: 'switch_tab',
+    group: 'browser',
     description: 'Make a tab the current tab and show it. Give tab_id, or query: text in the tab title or URL.',
     parameters: obj({ tab_id: { type: 'integer' }, query: { type: 'string', description: 'Text in the title or URL' } }),
     run: async (args, ctx) => {
@@ -706,6 +709,7 @@ export const TOOLS = [
   },
   {
     name: 'close_tab',
+    group: 'browser',
     description: 'Close a tab.',
     parameters: obj({ tab_id: { type: 'integer' } }, ['tab_id']),
     mutating: () => true,
@@ -721,6 +725,7 @@ export const TOOLS = [
   },
   {
     name: 'navigate',
+    group: 'browser',
     description: 'Go to a URL in the current tab, or go back/forward/reload.',
     parameters: obj({ url: { type: 'string' }, action: { type: 'string', enum: ['back', 'forward', 'reload'] }, ...TAB }),
     run: async (args, ctx) => {
@@ -752,6 +757,7 @@ export const TOOLS = [
   },
   {
     name: 'read_page',
+    group: 'browser',
     description:
       'Read the page as text. [12:button "Save"] = interactive element with id 12 (pass it to click, type_text, …); [7:link> … <7] wraps a clickable region; [9:image "alt" WxH] = image, usable as source "element:9".',
     parameters: obj({
@@ -782,6 +788,7 @@ export const TOOLS = [
   },
   {
     name: 'click',
+    group: 'browser',
     description: 'Click an element (id or selector), or a viewport point (x, y).',
     parameters: obj({ ...EL, x: { type: 'number' }, y: { type: 'number' }, double: { type: 'boolean' }, ...TAB }),
     mutating: () => true,
@@ -806,6 +813,7 @@ export const TOOLS = [
   },
   {
     name: 'type_text',
+    group: 'browser',
     description: 'Type into an input, textarea or editable element. Replaces its text unless clear=false.',
     parameters: obj({ ...EL, text: { type: 'string' }, clear: { type: 'boolean' }, press_enter: { type: 'boolean' }, ...TAB }, ['text']),
     mutating: () => true,
@@ -831,6 +839,7 @@ export const TOOLS = [
   },
   {
     name: 'select_option',
+    group: 'browser',
     description: 'Choose an option of a <select> by value or visible text.',
     parameters: obj({ ...EL, value: { type: 'string' }, ...TAB }, ['value']),
     mutating: () => true,
@@ -842,6 +851,7 @@ export const TOOLS = [
   },
   {
     name: 'press_key',
+    group: 'browser',
     description: 'Press a key (Enter, Escape, Tab, ArrowDown, a, …) on an element, or on the focused element.',
     parameters: obj(
       { key: { type: 'string' }, ...EL, ctrl: { type: 'boolean' }, shift: { type: 'boolean' }, alt: { type: 'boolean' }, meta: { type: 'boolean' }, ...TAB },
@@ -866,6 +876,7 @@ export const TOOLS = [
   },
   {
     name: 'scroll',
+    group: 'browser',
     description: 'Scroll the page, or a scrollable element. With an element and no direction, scrolls it into view.',
     parameters: obj({
       direction: { type: 'string', enum: ['up', 'down', 'left', 'right', 'top', 'bottom'] },
@@ -883,6 +894,7 @@ export const TOOLS = [
   },
   {
     name: 'hover',
+    group: 'browser',
     description: 'Move the mouse over an element (opens hover menus and tooltips).',
     parameters: obj({ ...EL, ...TAB }),
     run: async (args, ctx) => {
@@ -899,6 +911,7 @@ export const TOOLS = [
   },
   {
     name: 'wait',
+    group: 'browser',
     description: 'Wait some seconds, or until text or a CSS selector appears on the page.',
     parameters: obj({
       seconds: { type: 'number' },
@@ -934,6 +947,7 @@ export const TOOLS = [
   },
   {
     name: 'screenshot',
+    group: 'browser',
     description: 'Capture the visible part of the current tab as an image.',
     parameters: obj({ ...TAB }),
     run: async (args, ctx) => {
@@ -947,6 +961,7 @@ export const TOOLS = [
   },
   {
     name: 'run_javascript',
+    group: 'browser',
     description: 'Run JavaScript in the page. Runs as an async function body: use `return` for a value (a single expression also works).',
     parameters: obj({ code: { type: 'string' }, ...TAB }, ['code']),
     mutating: () => true,
@@ -968,12 +983,14 @@ export const TOOLS = [
   },
   {
     name: 'web_search',
+    group: 'web',
     description: 'Search the web. Returns titles, URLs and snippets.',
     parameters: obj({ query: { type: 'string' }, max_results: { type: 'integer' } }, ['query']),
     run: async (args, ctx) => webSearch(String(args.query ?? ''), Math.min(Number(args.max_results) || 8, 20), ctx.signal),
   },
   {
     name: 'fetch_url',
+    group: 'web',
     description:
       "Fetch a URL without opening a tab (uses the browser's cookies). HTML is converted to text; images and other files (PDF, Office, …) are saved as assets and their text is returned when readable.",
     parameters: obj(
@@ -1034,6 +1051,7 @@ export const TOOLS = [
   },
   {
     name: 'generate_image',
+    group: 'images',
     description: 'Create an image from a text prompt.',
     parameters: obj({ prompt: { type: 'string' }, size: { type: 'string', description: 'e.g. 1024x1024' } }, ['prompt']),
     run: async (args, ctx) => {
@@ -1050,6 +1068,7 @@ export const TOOLS = [
   },
   {
     name: 'edit_image',
+    group: 'images',
     description: 'Edit an image as described by the prompt.',
     parameters: obj({ prompt: { type: 'string' }, source: SOURCE, size: { type: 'string', description: 'e.g. 1024x1024' } }, ['prompt', 'source']),
     run: async (args, ctx) => {
@@ -1068,6 +1087,7 @@ export const TOOLS = [
   },
   {
     name: 'view_image',
+    group: 'browser',
     description: 'Look at an image.',
     parameters: obj({ source: SOURCE }, ['source']),
     run: async (args, ctx) => {
@@ -1084,6 +1104,7 @@ export const TOOLS = [
   },
   {
     name: 'read_file',
+    group: 'browser',
     description: 'Read the text of a file: an attachment or other asset (file_N), or a file URL. Handles text, PDF, Word, Excel and PowerPoint. Long text is paginated.',
     parameters: obj({ source: FILE_SOURCE, offset: { type: 'integer', description: 'Start at this character (pagination)' }, max_chars: { type: 'integer' } }, ['source']),
     run: async (args, ctx) => {
@@ -1104,6 +1125,7 @@ export const TOOLS = [
   },
   {
     name: 'upload_file',
+    group: 'browser',
     description: 'Put a file or image (any asset) into a file input (target the input or its container).',
     parameters: obj({ ...EL, source: FILE_SOURCE, filename: { type: 'string' }, ...TAB }, ['source']),
     mutating: () => true,
@@ -1121,6 +1143,7 @@ export const TOOLS = [
   },
   {
     name: 'set_page_image',
+    group: 'browser',
     description: 'Replace an image on the page (visual preview only, not saved to the site).',
     parameters: obj({ ...EL, source: SOURCE, ...TAB }, ['source']),
     run: async (args, ctx) => {
@@ -1139,6 +1162,7 @@ export const TOOLS = [
   },
   {
     name: 'download',
+    group: 'browser',
     description: "Save an asset (image or file) or a file URL to the user's Downloads folder.",
     parameters: obj({ source: FILE_SOURCE, filename: { type: 'string' } }, ['source']),
     mutating: () => true,
@@ -1169,6 +1193,7 @@ export const TOOLS = [
   },
   {
     name: 'update_progress',
+    group: 'memory',
     description:
       'Keep a running summary of what is done and what is left for long or bulk tasks. Replaces this chat\'s progress note; it survives even when older messages are trimmed from context, so you never redo finished items.',
     parameters: obj({ notes: { type: 'string', description: 'The full updated progress summary (replaces the previous one)' } }, ['notes']),
@@ -1180,6 +1205,7 @@ export const TOOLS = [
   },
   {
     name: 'remember',
+    group: 'memory',
     description: 'Save a durable fact to cross-chat memory so later chats can use it. scope "global" (everywhere) or "site" (this website, the default).',
     parameters: obj({ text: { type: 'string' }, scope: { type: 'string', enum: ['site', 'global'], description: 'Default "site"' } }, ['text']),
     mutating: () => false,
@@ -1204,6 +1230,7 @@ export const TOOLS = [
   },
   {
     name: 'recall',
+    group: 'memory',
     description: 'Look up saved memories (the relevant ones are already shown to you automatically). scope "all" (default), "site" or "global"; query filters by text.',
     parameters: obj({ query: { type: 'string' }, scope: { type: 'string', enum: ['all', 'site', 'global'], description: 'Default "all"' } }),
     mutating: () => false,
@@ -1223,6 +1250,7 @@ export const TOOLS = [
   },
   {
     name: 'forget',
+    group: 'memory',
     description: 'Delete a saved memory by its id (get the id from recall).',
     parameters: obj({ id: { type: 'string' } }, ['id']),
     mutating: () => false,

@@ -465,7 +465,12 @@ export class Agent {
       ctx.origin = String(opts.origin || '');
       ctx.notes = String(opts.notes || '');
       this._onNotes = typeof opts.onNotes === 'function' ? opts.onNotes : null;
-      const mcpReady = this.mcpTools(settings, signal); // connects while the message is being built
+      // Tool-use settings (absent => everything on, for back-compat). Don't even connect MCP/companion when the
+      // user turned tools off or disabled the "computer" group.
+      const toolCfg = settings.tools;
+      const toolsOn = !toolCfg || toolCfg.enabled !== false;
+      const computerOn = toolsOn && toolCfg?.groups?.computer !== false;
+      const mcpReady = computerOn ? this.mcpTools(settings, signal) : Promise.resolve([]); // connects while the message is being built
       await prepare(history, signal);
 
       const provider = (settings.providers || []).find((p) => p.id === settings.activeProviderId);
@@ -479,7 +484,10 @@ export class Agent {
 
       const extra = await mcpReady;
       signal.throwIfAborted();
-      const tools = [...TOOLS, ...extra];
+      // Filter by the tool-use settings: no tools at all when disabled; otherwise keep built-ins whose group is on
+      // and MCP/companion tools (in `extra`, already not connected when computer is off) when the computer group is on.
+      const groups = toolCfg?.groups || {};
+      const tools = !toolsOn ? [] : [...TOOLS.filter((t) => groups[t.group] !== false), ...(computerOn ? extra : [])];
       const byName = new Map(tools.map((t) => [t.name, t]));
       const computer = extra.some((t) => t.sensitive);
       // Fetch the relevant memories ONCE per run (not per step): 'global' + this origin, within the budget.

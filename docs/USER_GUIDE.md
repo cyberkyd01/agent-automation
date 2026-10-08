@@ -2,7 +2,7 @@
 
 Agent Automation is an AI agent that lives in your browser's side panel and works on the website next to it. You describe a job in plain words, and it reads the page, clicks, types, fills in forms, replies to messages, repeats a change across many rows, researches in other tabs, handles files and images, and, with an optional companion program, uses tools on your own computer (including terminals and applications such as Excel and Notepad) and can share your local models with another browser or app.
 
-This guide is for people who run websites or online shops. It explains how to get work done with the agent. The [README](../README.md) is the short overview and has the install steps; this guide goes through the panel, the recipes, every setting and what to do when something goes wrong. It describes version 1.5.
+This guide is for people who run websites or online shops. It explains how to get work done with the agent. The [README](../README.md) is the short overview and has the install steps; this guide goes through the panel, the recipes, every setting and what to do when something goes wrong. It describes version 1.6.
 
 Jump to the section you need. If you are new, read [Before you start](#before-you-start), [A tour of the panel](#a-tour-of-the-panel) and [Working with the agent](#working-with-the-agent) first, then try one recipe.
 
@@ -233,7 +233,7 @@ A small mark at the left of a tab shows its state:
 
 - **Your messages** appear on the right, with chips for any files you attached.
 - **The agent's answers** are formatted text: headings, lists, tables and code blocks. Code blocks have a **Copy** button.
-- **Thinking** is a collapsed block that appears above an answer when the model shows its reasoning. Click it to read; you can ignore it.
+- **Thinking** is a collapsed block that appears above an answer when the model shows its reasoning. Click it to read; you can ignore it. To hide it, switch off **Show thinking in the chat** in Settings → Behaviour → Thinking (see [Behaviour](#behaviour)).
 - **Tool cards** show each action the agent takes, such as `read_page` or `click`. The icon tells you what happened:
 
   | Icon | Meaning |
@@ -883,7 +883,7 @@ The home page has a **Getting started** card at the top and one card for each ar
 | **Computer tools** | Let the agent use this computer: commands, files, terminals, apps. | "Not set up", "Switched off", "Checking…", "Connected · 31 tools", "Not running", "Wrong token" or "Error". |
 | **Remote access** | Use your local models and tools from another browser or device. | "Needs computer tools", "Stopped", "Starting…", "Running" or "Error". |
 | **Remote MCP servers** | Tools from servers on the internet. | "None", "All switched off", or the number of servers, such as "1 server". |
-| **About & help** | Version, user guide, feedback. | "Version 1.5.0". |
+| **About & help** | Version, user guide, feedback. | "Version 1.6.0". |
 
 The pills only report. The companion is checked again when you open the home page, so a pill can say "Checking…" for a moment.
 
@@ -972,6 +972,8 @@ On the home page the Images pill reads "Off" while the vendor is **None (image t
 
 "Approvals, queue, limits, notifications." This is how the agent works: when it asks you first, how queued prompts run, how far it may go on its own, and what it is told on every request. The page is a stack of cards, and the settings you seldom change are folded under **Advanced**.
 
+<img src="images/settings-behaviour-thinking.png" alt="The Behaviour settings page showing the Thinking card (a Thinking select set to On, an Effort select set to High, and a 'Show thinking in the chat' checkbox) and the top of the Tools card with the 'Let the agent use tools' master switch." width="400">
+
 <img src="images/settings-behaviour.png" alt="Settings, Behaviour page: the 'What this does' note, then cards for Approvals (Approval set to Ask before acting, with a Computer tools approval link), Queue (Queue mode set to Run all), Limits (Max steps per prompt set to 0) and the start of Notifications." width="400">
 
 | Card | Field | Meaning | Default |
@@ -983,11 +985,22 @@ On the home page the Images pill reads "Off" while the vendor is **None (image t
 | **Model options** | **Vision** | Whether screenshots and images are sent to the model: **Auto-detect**, **On** or **Off**. With Auto-detect, the agent tries, and stops sending images if the model refuses them. | Auto-detect |
 | | **Tool calling** | How tools are offered to the model: **Auto (native, fall back to prompted)**, **Native**, or **Prompted (for models without tool support)**. Prompted describes the tools in the instructions and the model writes calls as text, which is less reliable. | Auto |
 | | **Max output tokens** | Longest reply the model may write. Blank means the provider default. | Blank |
+| **Thinking** | **Thinking** | **Auto**, **On** or **Off**. Auto uses the model's own default. On asks reasoning-capable models to think more, using each provider's own method: a reasoning effort for OpenAI-style providers, a thinking budget for Anthropic, and a soft switch for Qwen. Off asks the model to skip visible reasoning where it can; it works best on Qwen. A model that does not support the setting ignores it, and the extension falls back automatically so nothing breaks. | Auto |
+| | **Effort** | **Minimal**, **Low**, **Medium** or **High**. Shown only when Thinking is On. How hard a reasoning model thinks; higher is slower and may cost more. | Medium |
+| | **Show thinking in the chat** | Whether the collapsible **Thinking** block appears under each answer. Display only; the model reasons the same either way. | On |
+| **Tools** | **Let the agent use tools** | The master switch. Off makes the agent a plain chat assistant: no clicking, typing, searching, images, computer tools or memory, only conversation. | On |
+| | **Browser & page actions** | Read, click, type and move around web pages and tabs. Greyed out while the master switch is off. | On |
+| | **Web search & fetch** | Search the web and read pages without opening them. | On |
+| | **Image generation & editing** | Make or change pictures with your image vendor. | On |
+| | **Computer tools & MCP servers** | Commands, files and apps on this computer, plus remote MCP servers. | On |
+| | **Memory** | Save and look up notes that persist between chats. | On |
 | **Your instructions** | **Custom instructions** | Text added to the agent's instructions on every request, for example "Reply in British English. Never submit payment forms." | Empty |
 | **Advanced** (folded) | **Temperature** | How adventurous the model is, from 0 (steady) to 2. Blank means the model default. | Blank |
 | | **Context budget (chars)** | How much conversation text is sent to the model, counted in characters (roughly four per token). Older tool output and long old messages are shortened to fit; the chat itself keeps everything. Lower it for small-context models. Minimum 2,000. | 100000 |
 | | **Max tool output (chars)** | Longest result of a single tool call that the model sees. Longer results are cut. Minimum 2,000. | 12000 |
 | | **Trusted input events** | Uses Chrome's debugger to send real mouse and keyboard events, for sites that ignore simulated ones. Chrome shows a debugging banner while it is active. Not available in Firefox. | Off |
+
+The Thinking and Tools settings are saved, apply to all chats, and take effect on the next request you send; a run already in progress is not changed. Turning a Tools switch off removes those tools from the agent, so it cannot use them at all, whatever you ask. Use this for a research-only chat (turn **Browser & page actions** off) or to be sure the agent cannot touch your machine (turn **Computer tools & MCP servers** off).
 
 On the home page the pill shows the approval mode and the step limit. It turns amber for **Act without asking**.
 
@@ -1533,6 +1546,9 @@ Chrome shows that the extension can read and change data on all websites. That i
 | "Step limit reached (N). Send "continue" to keep going." | You set **Max steps per prompt** to a number, and the request used it up. | Type `continue`, raise **Max steps per prompt**, or set it to `0` for no limit. |
 | It keeps trying the same failing thing | The model is stuck. After three identical failures it is told to try something else, but nothing forces it to. | Press **Stop**, say what to do differently, or use a stronger model. See [Long tasks](#long-tasks). |
 | It describes a screenshot wrongly or says it cannot see | The model has no vision. | Use a vision-capable model, or ask for text-based answers. Settings → Behaviour → **Vision** can be set to **On** or **Off**. |
+| It is slow, or I do not want to see its reasoning | A reasoning model is thinking at length, or the **Thinking** block is shown. | Settings → Behaviour → Thinking: set **Thinking** to **Off** (best on Qwen models) or lower **Effort**. To only hide the block, switch off **Show thinking in the chat**. |
+| I want a plain chatbot with no actions | The agent has tools by default. | Settings → Behaviour → Tools: switch **Let the agent use tools** off. |
+| I want to stop it using my computer, or one kind of tool | That tool category is on. | Settings → Behaviour → Tools: switch off **Computer tools & MCP servers**, or any other category (**Browser & page actions**, **Web search & fetch**, **Image generation & editing**, **Memory**). It applies from the next request. |
 | It does something you did not ask for | The wording was open, or a page contained instructions. | Stop, undo by hand, and be more specific. See [Prompt injection](#prompt-injection). |
 
 ### Pages and clicking
