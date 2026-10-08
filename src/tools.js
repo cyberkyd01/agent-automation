@@ -2,6 +2,7 @@ import { api } from './host/api.js';
 import { cdp, cdpClick, cdpInsertText, cdpKey, cdpEval, hasDebugger, NO_DEBUGGER } from './cdp.js';
 import { sleep, pause, blobToDataUrl, httpError, safeParse, mimeOf, withExt } from './util.js';
 import { extractText, formatBytes, guessMime, MAX_ATTACH_BYTES, MAX_DATA_URL_BYTES, assetBlob, assetDataUrl, bytesToBase64, toBlob } from './files.js';
+import { generateImage, editImage, imageReady } from './image.js';
 
 /* ---------- page plumbing ---------- */
 
@@ -510,75 +511,13 @@ function paginate(text, args, ctx, next) {
 
 /* ---------- image generation ---------- */
 
-function imageApi(ctx) {
-  const cfg = ctx.settings.image || {};
-  const p = cfg.providerId && (ctx.settings.providers || []).find((x) => x.id === cfg.providerId);
-  if (!p || !cfg.model) throw new Error('No image model configured. Ask the user to open Settings → Images and choose a provider and model.');
-  return {
-    cfg,
-    name: p.name || p.id,
-    base: (p.baseUrl || '').replace(/\/+$/, ''),
-    auth: p.apiKey ? { Authorization: `Bearer ${p.apiKey}` } : {},
-  };
-}
+// The active chat provider, for the 'chat-model' image vendor (and resolved by src/image.js for 'openai').
+const activeProviderOf = (ctx) => (ctx.settings.providers || []).find((p) => p.id === ctx.settings.activeProviderId) || null;
 
-async function postJson(url, init, who, signal) {
-  let res;
-  try {
-    res = await fetch(url, { method: 'POST', ...init, signal });
-  } catch (e) {
-    if (e.name === 'AbortError') throw e;
-    throw new Error(`Cannot reach ${who} at ${url} (${e.message}).`);
-  }
-  if (!res.ok) throw await httpError(res);
-  return res.json();
-}
-
-const b64Mime = (b64) => (b64.startsWith('/9j/') ? 'image/jpeg' : b64.startsWith('UklGR') ? 'image/webp' : 'image/png');
-
-// Returns data URLs. `src` (a PNG data URL) switches from generation to editing.
-async function makeImages(ctx, prompt, src, size) {
-  const { cfg, name, base, auth } = imageApi(ctx);
-  const { signal } = ctx;
-  size = size || cfg.size;
-  const json = { 'Content-Type': 'application/json', ...auth };
-
-  if (cfg.api === 'chat') {
-    const content = [{ type: 'text', text: prompt }];
-    if (src) content.push({ type: 'image_url', image_url: { url: src } });
-    const body = { model: cfg.model, messages: [{ role: 'user', content }], modalities: ['image', 'text'] };
-    const j = await postJson(`${base}/chat/completions`, { headers: json, body: JSON.stringify(body) }, name, signal);
-    const msg = j.choices?.[0]?.message || {};
-    const parts = Array.isArray(msg.content) ? msg.content : [];
-    const urls = [...(msg.images || []), ...parts.filter((p) => p?.type === 'image_url')]
-      .map((im) => im?.image_url?.url || im?.url)
-      .filter(Boolean);
-    if (!urls.length) {
-      const said = typeof msg.content === 'string' ? msg.content : parts.filter((p) => p?.type === 'text').map((p) => p.text).join('\n');
-      throw new Error('The image model returned no image.' + (said ? ' It replied: ' + short(said, 500) : ''));
-    }
-    return Promise.all(urls.map((u) => toDataUrl(u, signal)));
-  }
-
-  let j;
-  if (src) {
-    const fd = new FormData();
-    fd.append('model', cfg.model);
-    fd.append('prompt', prompt);
-    fd.append('image', await (await fetch(src)).blob(), 'image.png');
-    if (size) fd.append('size', size);
-    j = await postJson(`${base}/images/edits`, { headers: auth, body: fd }, name, signal);
-  } else {
-    const body = { model: cfg.model, prompt, n: 1, ...(size ? { size } : {}) };
-    j = await postJson(`${base}/images/generations`, { headers: json, body: JSON.stringify(body) }, name, signal);
-  }
-  const out = [];
-  for (const d of j.data || []) {
-    if (d.b64_json) out.push(`data:${b64Mime(d.b64_json)};base64,${d.b64_json}`);
-    else if (d.url) out.push(await toDataUrl(d.url, signal));
-  }
-  if (!out.length) throw new Error('The image API returned no images.');
-  return out;
+// Throws the readable "not configured" reason (which names Settings → Images) before any source is captured.
+function requireImage(ctx) {
+  const r = imageReady(ctx.settings);
+  if (!r.ok) throw new Error(r.reason || 'No image model configured — open Settings → Images and choose a vendor.');
 }
 
 async function assetResult(urls, label, ctx) {
@@ -1097,16 +1036,34 @@ export const TOOLS = [
     name: 'generate_image',
     description: 'Create an image from a text prompt.',
     parameters: obj({ prompt: { type: 'string' }, size: { type: 'string', description: 'e.g. 1024x1024' } }, ['prompt']),
-    run: async (args, ctx) => assetResult(await makeImages(ctx, String(args.prompt ?? ''), null, args.size), 'generated', ctx),
+    run: async (args, ctx) => {
+      requireImage(ctx);
+      const { dataUrls } = await generateImage({
+        prompt: String(args.prompt ?? ''),
+        size: args.size,
+        settings: ctx.settings,
+        activeProvider: activeProviderOf(ctx),
+        signal: ctx.signal,
+      });
+      return assetResult(dataUrls, 'generated', ctx);
+    },
   },
   {
     name: 'edit_image',
     description: 'Edit an image as described by the prompt.',
-    parameters: obj({ prompt: { type: 'string' }, source: SOURCE }, ['prompt', 'source']),
+    parameters: obj({ prompt: { type: 'string' }, source: SOURCE, size: { type: 'string', description: 'e.g. 1024x1024' } }, ['prompt', 'source']),
     run: async (args, ctx) => {
-      imageApi(ctx); // fail fast before capturing or fetching the source
+      requireImage(ctx); // fail fast before capturing or fetching the source
       const png = await toPng(await resolveSource(args.source, ctx));
-      return assetResult(await makeImages(ctx, String(args.prompt ?? ''), png), 'edited', ctx);
+      const { dataUrls } = await editImage({
+        prompt: String(args.prompt ?? ''),
+        images: [png],
+        size: args.size,
+        settings: ctx.settings,
+        activeProvider: activeProviderOf(ctx),
+        signal: ctx.signal,
+      });
+      return assetResult(dataUrls, 'edited', ctx);
     },
   },
   {
@@ -1208,6 +1165,72 @@ export const TOOLS = [
       }
       if (objectUrl) revokeWhenDone(id, objectUrl);
       return `Download started (id ${id})${filename ? ` as ${filename}` : ''}.`;
+    },
+  },
+  {
+    name: 'update_progress',
+    description:
+      'Keep a running summary of what is done and what is left for long or bulk tasks. Replaces this chat\'s progress note; it survives even when older messages are trimmed from context, so you never redo finished items.',
+    parameters: obj({ notes: { type: 'string', description: 'The full updated progress summary (replaces the previous one)' } }, ['notes']),
+    mutating: () => false,
+    run: async (args, ctx) => {
+      ctx.setNotes(String(args.notes || ''));
+      return 'Progress note updated.';
+    },
+  },
+  {
+    name: 'remember',
+    description: 'Save a durable fact to cross-chat memory so later chats can use it. scope "global" (everywhere) or "site" (this website, the default).',
+    parameters: obj({ text: { type: 'string' }, scope: { type: 'string', enum: ['site', 'global'], description: 'Default "site"' } }, ['text']),
+    mutating: () => false,
+    run: async (args, ctx) => {
+      const text = String(args.text || '');
+      if (!text.trim()) throw new Error('Nothing to remember — the text is empty.');
+      let resolved;
+      let note = '';
+      if (args.scope === 'global') {
+        resolved = 'global';
+      } else if (ctx.origin) {
+        resolved = ctx.origin;
+      } else {
+        resolved = 'global';
+        note = ' (saved globally because this page has no website)';
+      }
+      const saved = await ctx.memory.save({ scope: resolved, text, source: 'agent' });
+      if (!saved) throw new Error('That memory could not be saved.');
+      const where = saved.scope === 'global' ? 'globally' : `for ${saved.scope}`;
+      return `Remembered ${where}${note}. (id ${saved.id} — use forget to remove it.)`;
+    },
+  },
+  {
+    name: 'recall',
+    description: 'Look up saved memories (the relevant ones are already shown to you automatically). scope "all" (default), "site" or "global"; query filters by text.',
+    parameters: obj({ query: { type: 'string' }, scope: { type: 'string', enum: ['all', 'site', 'global'], description: 'Default "all"' } }),
+    mutating: () => false,
+    run: async (args, ctx) => {
+      let list = await ctx.memory.list();
+      if (args.scope === 'global') list = list.filter((m) => m.scope === 'global');
+      else if (args.scope === 'site') list = list.filter((m) => ctx.origin && m.scope === ctx.origin);
+      const q = String(args.query || '').trim().toLowerCase();
+      if (q) list = list.filter((m) => String(m.text || '').toLowerCase().includes(q));
+      if (!list.length) return 'Nothing saved.';
+      const MAX = 100;
+      const shown = list.slice(0, MAX);
+      const lines = shown.map((m, i) => `${i + 1}. ${m.id} · [${m.scope === 'global' ? 'global' : 'site'}] ${m.text}`);
+      if (list.length > MAX) lines.push(`… and ${list.length - MAX} more (narrow with query).`);
+      return lines.join('\n');
+    },
+  },
+  {
+    name: 'forget',
+    description: 'Delete a saved memory by its id (get the id from recall).',
+    parameters: obj({ id: { type: 'string' } }, ['id']),
+    mutating: () => false,
+    run: async (args, ctx) => {
+      const id = String(args.id || '').trim();
+      if (!id) throw new Error('Provide the memory id (from recall).');
+      await ctx.memory.delete(id);
+      return `Forgot memory ${id}.`;
     },
   },
 ];

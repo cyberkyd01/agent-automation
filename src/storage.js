@@ -21,7 +21,8 @@ const provider = (id) => ({ id, ...PRESETS[id], apiKey: '', model: '', models: [
 export const DEFAULTS = {
   providers: [provider('lmstudio'), provider('ollama')],
   activeProviderId: 'lmstudio',
-  image: { providerId: '', model: '', api: 'images', size: '' },
+  // Vendor-aware (v1.4). Old { providerId, model, api, size } objects are migrated on load (see migrateImage).
+  image: { vendor: 'none', providerId: '', apiKey: '', baseUrl: '', model: '', size: '', api: 'images' },
   mcpServers: [],
   approval: 'ask', // ask | auto
   vision: 'auto', // auto | on | off
@@ -35,6 +36,8 @@ export const DEFAULTS = {
   customPrompt: '',
   // Local program that gives the agent OS tools; approval: 'ask' (always confirm its tools) | 'follow' (use `approval`).
   companion: { enabled: false, url: 'http://127.0.0.1:8765', token: '', approval: 'ask' },
+  // Cross-chat memory: inject saved notes into new runs; maxInjectChars caps how much is injected per run.
+  memory: { enabled: true, maxInjectChars: 4000 },
   queueMode: 'auto', // auto (run queued prompts back to back) | step (pause after each)
   notifications: true, // desktop notifications (approvals, finished/failed jobs) while the panel is closed
 };
@@ -42,14 +45,23 @@ export const DEFAULTS = {
 // v1.1 saved its default step limit (40) with every settings save; v1.2 has no limit unless the user sets one.
 const OLD_DEFAULT_STEPS = 40;
 
+// v1.4 made settings.image vendor-aware. A pre-v1.4 object has no `vendor`: one that named an OpenAI-compatible
+// provider becomes vendor 'openai'; otherwise image tools were effectively off, so 'none'. Unknown keys are kept.
+function migrateImage(image) {
+  if (!image || typeof image !== 'object') return {};
+  if (typeof image.vendor === 'string' && image.vendor) return image; // already vendor-aware
+  return { ...image, vendor: image.providerId ? 'openai' : 'none' };
+}
+
 export async function loadSettings() {
   const { settings = {} } = (await api.storage.local.get('settings')) || {};
   const base = structuredClone(DEFAULTS);
   const s = {
     ...base,
     ...settings,
-    image: { ...base.image, ...settings.image },
+    image: { ...base.image, ...migrateImage(settings.image) },
     companion: { ...base.companion, ...settings.companion },
+    memory: { ...base.memory, ...settings.memory },
   };
   if (!settings.stepsV12) {
     if (Number(s.maxSteps) === OLD_DEFAULT_STEPS) s.maxSteps = 0;
@@ -80,6 +92,8 @@ async function applyOriginRules(s) {
     ...(s.providers || []).map((p) => [p.baseUrl, false]),
     ...(s.mcpServers || []).map((m) => [m.url, false]),
     [s.companion?.url, true],
+    // A self-hosted image endpoint (base URL override) needs the same Origin rewrite when it is loopback/private.
+    [s.image?.baseUrl, false],
   ];
   for (const [u, own] of urls) {
     try {

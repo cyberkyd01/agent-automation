@@ -1683,3 +1683,133 @@ button.step-head:hover {
 .provider-card {
   gap: 8px;
 }
+
+/* Images: the vendor's fields, the key link and the base URL fold. */
+.image-note {
+  margin: 0;
+}
+
+.image-key-help {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 2px;
+  margin: 0;
+}
+
+.image-key-help .tools-link {
+  font-weight: 500;
+}
+
+.image-key-where,
+.image-adv .hint {
+  overflow-wrap: anywhere;
+}
+
+/* ---------- Memory ---------- */
+
+.memory-filters {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+  margin-top: 10px;
+}
+
+@media (min-width: 420px) {
+  .memory-filters {
+    grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  }
+}
+
+.memory-filters select,
+.memory-filters input {
+  max-width: 100%;
+  min-width: 0;
+}
+
+.memory-msg {
+  margin-top: 10px;
+}
+
+.memory-status,
+.memory-empty {
+  margin: 10px 0 0;
+}
+
+.memory-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+  min-width: 0;
+}
+
+.memory-group {
+  margin: 8px 0 0;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.memory-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    'text text'
+    'meta del';
+  align-items: center;
+  gap: 6px 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--set-item);
+  min-width: 0;
+}
+
+.memory-text {
+  grid-area: text;
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.memory-meta {
+  grid-area: meta;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  min-width: 0;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.memory-scope {
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+
+.memory-scope.global {
+  color: var(--fg);
+}
+
+.memory-row > .btn {
+  grid-area: del;
+  padding: 3px 10px;
+  font-size: 12px;
+}
+
+.memory-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}

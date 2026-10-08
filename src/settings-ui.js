@@ -4,6 +4,8 @@
 import { DEFAULTS, PRESETS } from './storage.js';
 import { listModels, modelLabel, pickModel } from './providers.js';
 import { newId, repoLink } from './util.js';
+import { IMAGE_VENDORS } from './image.js';
+import { memStore, originOf } from './memory.js';
 import { QUEUE_MODES, computerToolsSection, ensureToolSettings, mcpTestControls, providerCodeControls, remoteAccessSection } from './settings-tools-ui.js';
 
 /* ---------- areas ---------- */
@@ -21,7 +23,7 @@ export const SECTIONS = [
     name: 'Images',
     purpose: 'Create and edit images.',
     icon: 'images',
-    intro: 'Lets the agent make pictures from a description and change images you attach. It needs an OpenAI-compatible provider that offers an image model.',
+    intro: 'Lets the agent make pictures from a description and change images you attach. It can already do this with your main chat model if that model can output images: pick “Your main chat model” below. Choose another vendor only if your workflow needs one.',
   },
   {
     key: 'behaviour',
@@ -29,6 +31,13 @@ export const SECTIONS = [
     purpose: 'Approvals, queue, limits, notifications.',
     icon: 'behaviour',
     intro: 'How the agent works: when it asks you first, how queued prompts run, how far it may go on its own, and what it is told on every request.',
+  },
+  {
+    key: 'memory',
+    name: 'Memory',
+    purpose: 'What the agent remembers across chats.',
+    icon: 'memory',
+    intro: 'The agent can remember lasting facts across chats, either everywhere (Global) or for one website, and keeps a short progress note inside each chat so long tasks do not repeat finished work. Here you review and delete what it has saved. It saves these itself when it learns something worth keeping, and you can tell it “remember that …” or “forget …”.',
   },
   {
     key: 'computer',
@@ -66,12 +75,13 @@ export const COMPANION_TTL = 10000;
 
 // Kept for the whole panel session (across openings of Settings): the last companion check, the tunnel state and
 // the result of each provider's last Test connection.
-const live = { companion: null, tunnel: null, providers: new Map(), chats: null };
+const live = { companion: null, tunnel: null, providers: new Map(), chats: null, memCount: null };
 export function resetSettingsState() {
   live.companion = null;
   live.tunnel = null;
   live.providers.clear();
   live.chats = null;
+  live.memCount = null;
 }
 
 /* ---------- small DOM helpers ---------- */
@@ -92,6 +102,7 @@ const ICONS = {
   computer: ['M5 4h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z', 'M8 21h8M12 17v4', 'M7.5 8.5l2.5 2-2.5 2M12.5 12.5h4'],
   remote: [RING, 'M3 12h18', 'M12 3c2.5 2.7 3.8 5.7 3.8 9s-1.3 6.3-3.8 9c-2.5-2.7-3.8-5.7-3.8-9S9.5 5.7 12 3z'],
   mcp: ['M9 2.5V7M15 2.5V7', 'M6 7h12v4a6 6 0 0 1-12 0V7z', 'M12 17v4.5'],
+  memory: ['M9 3h6v3.5a2 2 0 0 0 .6 1.4L18 10.3V20a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1v-9.7l2.4-2.4A2 2 0 0 0 9 6.5V3z', 'M9.5 14h5M9.5 17h3'],
   about: [RING, 'M12 11v5.5', 'M12 7.6v.01'],
   start: ['M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z', 'M18.5 15.5l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7.7-1.8z'],
   chevron: ['M9 6l6 6-6 6'],
@@ -213,6 +224,30 @@ function removeButton(onConfirm) {
       return;
     }
     b.textContent = 'Confirm remove';
+    b.classList.add('confirm');
+    timer = setTimeout(reset, 3000);
+  });
+  b.addEventListener('blur', () => timer && reset());
+  return b;
+}
+
+// Like removeButton, with its own labels: the first click asks, the second (within 3 s) does it.
+function confirmButton(label, confirmLabel, onConfirm) {
+  const b = button(label, 'danger');
+  let timer = 0;
+  const reset = () => {
+    clearTimeout(timer);
+    timer = 0;
+    b.textContent = label;
+    b.classList.remove('confirm');
+  };
+  b.addEventListener('click', () => {
+    if (timer) {
+      reset();
+      onConfirm();
+      return;
+    }
+    b.textContent = confirmLabel;
     b.classList.add('confirm');
     timer = setTimeout(reset, 3000);
   });
@@ -348,6 +383,13 @@ const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const MODEL_SUMMARY_MAX = 8; // models named on a provider card before "and N more"
 const errText = (e) => (e?.message || String(e || 'unknown error')).replace(/\s+/g, ' ').trim();
 
+// The image vendor a setting stands for. Settings saved before vendors existed hold a provider and no vendor.
+const imageVendorOf = (img) => {
+  const v = img?.vendor;
+  if (typeof v === 'string' && Object.hasOwn(IMAGE_VENDORS, v)) return v;
+  return !v && img?.providerId ? 'openai' : 'none';
+};
+
 /* ---------- render ---------- */
 
 // Builds Settings into `container` (the scrolling #settingsBody). Returns { show(section), section, refresh() }.
@@ -357,6 +399,9 @@ export function renderSettings(container, settings, opts = {}) {
   const { save, onProvidersChanged, onNavigate, onClose, hasChats } = opts;
   // Settings saved by an older version lack the newer fields.
   ensureToolSettings(settings, DEFAULTS);
+  if (!settings.memory || typeof settings.memory !== 'object') settings.memory = {};
+  settings.memory.enabled = settings.memory.enabled !== false;
+  if (!Number.isFinite(Number(settings.memory.maxInjectChars))) settings.memory.maxInjectChars = DEFAULTS.memory?.maxInjectChars ?? 4000;
 
   /* --- saving --- */
 
@@ -759,29 +804,46 @@ export function renderSettings(container, settings, opts = {}) {
 
   function buildImages(root) {
     const img = settings.image;
+    // Settings saved before vendors existed name no vendor: they were using their OpenAI-compatible provider.
+    if (!img.vendor) img.vendor = imageVendorOf(img);
+    const vendorOf = () => imageVendorOf(img);
+    const specOf = () => IMAGE_VENDORS[vendorOf()] || {};
+    const hintOf = (f) => f.querySelector('.hint');
+
+    const vendor = selectBox(
+      Object.entries(IMAGE_VENDORS).map(([k, v]) => [k, v.label || k]),
+      vendorOf()
+    );
+    vendor.id = 'imageVendor';
+    const note = el('p', 'hint image-note', 'Uses the model selected in the panel header, when it can output images.');
+    note.id = 'imageVendorNote';
+
+    // The Test result is about the settings as they were; any change takes it away.
+    const testBtn = button('Test', 'primary');
+    testBtn.id = 'imageTest';
+    const actions = el('div', 'card-actions');
+    actions.append(testBtn);
+    const testMsg = el('div', 'test-result');
+    testMsg.id = 'imageTestMsg';
+    testMsg.setAttribute('role', 'status');
+    testMsg.hidden = true;
+    let testRun = 0;
+    function resetTest() {
+      testRun++;
+      testBtn.disabled = false;
+      testMsg.hidden = true;
+      testMsg.textContent = '';
+    }
+
+    /* OpenAI-compatible provider: the provider, its API mode, model and size. */
     const imageProvider = el('select');
     imageProvider.id = 'imageProvider';
-    const none = el('div', 'add-option');
-    none.hidden = true;
+    const noProviders = el('div', 'add-option');
+    noProviders.hidden = true;
     const goModels = button('Open Models & providers');
     goModels.addEventListener('click', () => navigate('models'));
-    none.append(el('p', 'hint', 'There is no OpenAI-compatible provider yet. Add one first, for example OpenAI or OpenRouter.'), goModels);
-
-    refreshImageProviders = () => {
-      const opts = [['', 'None (image tools off)'], ...settings.providers.filter((p) => p.type === 'openai').map((p) => [p.id, p.name || 'Unnamed provider'])];
-      if (img.providerId && !opts.some(([v]) => v === img.providerId)) {
-        img.providerId = '';
-        commit();
-      }
-      setOptions(imageProvider, opts, img.providerId);
-      none.hidden = opts.length > 1;
-    };
-    refreshImageProviders();
-    bindSelect(img, 'providerId', imageProvider);
-
-    const imgModel = textInput(img.model, 'text', 'e.g. gpt-image-1');
-    imgModel.id = 'imageModel';
-    bindText(img, 'model', imgModel);
+    noProviders.append(el('p', 'hint', 'There is no OpenAI-compatible provider yet. Add one first, for example OpenAI or OpenRouter.'), goModels);
+    bindSelect(img, 'providerId', imageProvider, resetTest);
 
     const imgApi = selectBox(
       [
@@ -790,22 +852,204 @@ export function renderSettings(container, settings, opts = {}) {
       ],
       img.api
     );
-    imgApi.id = 'imageApi';
-    bindSelect(img, 'api', imgApi);
+    imgApi.id = 'imageApiMode';
+    bindSelect(img, 'api', imgApi, resetTest);
 
-    const imgSize = textInput(img.size, 'text', '1024x1024');
-    imgSize.id = 'imageSize';
-    bindText(img, 'size', imgSize);
+    const providerField = field('Provider', imageProvider);
+    const apiField = field('API mode', imgApi, 'Use chat completions for models that return images in chat replies (e.g. Gemini image models via OpenRouter).');
 
-    const c = card('Image model', 'Only OpenAI-compatible providers can be picked. Leave the provider at None to switch image tools off.', { id: 'settingsImage' });
-    c.append(
-      none,
-      field('Provider', imageProvider),
-      field('Model ID', imgModel),
-      field('API mode', imgApi, 'Use chat completions for models that return images in chat replies (e.g. Gemini image models via OpenRouter).'),
-      field('Size', imgSize, 'Optional. Leave blank for the model default.')
+    /* Hosted vendors: an API key (masked unless Show is pressed), a link to where to get one. */
+    const key = textInput(img.apiKey, 'password', 'Paste your API key');
+    key.id = 'imageApiKey';
+    const keyField = field('API key', key, 'Stored in this browser only.');
+    const reveal = button('Show');
+    reveal.id = 'imageApiKeyShow';
+    reveal.setAttribute('aria-controls', key.id);
+    const maskKey = () => {
+      key.type = 'password';
+      reveal.textContent = 'Show';
+      reveal.setAttribute('aria-pressed', 'false');
+      reveal.setAttribute('aria-label', 'Show API key');
+    };
+    reveal.addEventListener('click', () => {
+      const on = key.type === 'password';
+      key.type = on ? 'text' : 'password';
+      reveal.textContent = on ? 'Hide' : 'Show';
+      reveal.setAttribute('aria-pressed', String(on));
+      reveal.setAttribute('aria-label', on ? 'Hide API key' : 'Show API key');
+    });
+    const keyRow = el('div', 'input-row');
+    keyField.replaceChild(keyRow, key);
+    keyRow.append(key, reveal);
+    bindText(img, 'apiKey', key, resetTest);
+    const keyLink = el('a', 'tools-link', 'Get a key');
+    keyLink.id = 'imageKeyLink';
+    keyLink.target = '_blank';
+    keyLink.rel = 'noreferrer';
+    const keyWhere = el('span', 'image-key-where');
+    const keyHelp = el('div', 'hint image-key-help');
+    keyHelp.append(keyLink, keyWhere);
+    keyField.append(keyHelp);
+
+    /* Model and size are shared by both kinds; the vendor's own suggestions come as a datalist. */
+    const model = textInput(img.model, 'text');
+    model.id = 'imageModel';
+    const modelList = el('datalist');
+    modelList.id = 'imageModelList';
+    bindText(img, 'model', model, resetTest);
+    const modelField = field('Model', model, ' ');
+    modelField.append(modelList);
+
+    const size = textInput(img.size, 'text');
+    size.id = 'imageSize';
+    const sizeList = el('datalist');
+    sizeList.id = 'imageSizeList';
+    bindText(img, 'size', size, resetTest);
+    const sizeField = field('Size', size, 'Optional. Leave blank for the model default.');
+    sizeField.append(sizeList);
+
+    /* Advanced: where the vendor's API lives, for a proxy or a server of your own. */
+    const base = textInput(img.baseUrl, 'url');
+    base.id = 'imageBaseUrl';
+    bindText(img, 'baseUrl', base, resetTest);
+    const baseField = field('Base URL', base, ' ');
+    const adv = advanced('imageAdvanced');
+    adv.root.classList.add('image-adv');
+    adv.body.append(el('p', 'hint', 'Change this only to use a proxy or a server you run yourself.'), baseField);
+
+    const setList = (list, values) => list.replaceChildren(...values.map((v) => Object.assign(el('option'), { value: v })));
+    const point = (ctl, list, values) => (values.length ? ctl.setAttribute('list', list.id) : ctl.removeAttribute('list'));
+
+    // Shows the fields this vendor uses, with its own labels, suggestions and key link.
+    function paint() {
+      const v = vendorOf();
+      const spec = specOf();
+      const openai = v === 'openai';
+      const native = !!spec.byok;
+      const models = Array.isArray(spec.models) ? spec.models.filter((m) => typeof m === 'string') : [];
+      const sizes = Array.isArray(spec.sizes) ? spec.sizes.filter((m) => typeof m === 'string') : [];
+      if (vendor.value !== v) vendor.value = v;
+      const label = spec.label || v;
+
+      note.hidden = v !== 'chat-model';
+      noProviders.hidden = !openai || imageProvider.options.length > 1;
+      providerField.hidden = !openai;
+      apiField.hidden = !openai;
+      keyField.hidden = !native;
+      modelField.hidden = !(openai || native);
+      sizeField.hidden = !(openai || (native && sizes.length > 0));
+      adv.root.hidden = !native;
+      actions.hidden = v === 'none';
+
+      hintOf(keyField).textContent = `Stored in this browser only, and sent only to ${label}.`;
+      const url = typeof spec.keyUrl === 'string' && /^https:\/\//i.test(spec.keyUrl) ? spec.keyUrl : '';
+      keyLink.hidden = !url;
+      if (url) keyLink.href = url;
+      else keyLink.removeAttribute('href');
+      keyWhere.textContent = spec.keyHelp ? ` · ${spec.keyHelp}` : '';
+
+      model.placeholder = openai ? 'e.g. gpt-image-1' : models[0] ? `e.g. ${models[0]}` : 'Model ID';
+      setList(modelList, models);
+      point(model, modelList, models);
+      hintOf(modelField).textContent = openai
+        ? 'The image model your provider offers.'
+        : models.length
+          ? 'Pick one of the suggestions or type any model ID. Blank uses the default.'
+          : 'The vendor’s model ID. Blank uses the default.';
+
+      size.placeholder = sizes[0] || '1024x1024';
+      setList(sizeList, sizes);
+      point(size, sizeList, sizes);
+
+      base.placeholder = spec.baseUrl || '';
+      hintOf(baseField).textContent = spec.baseUrl ? `Blank uses ${spec.baseUrl}.` : 'Blank uses the vendor’s own address.';
+    }
+
+    // The values of the fields, after the vendor changed.
+    function fill() {
+      key.value = img.apiKey ?? '';
+      model.value = img.model ?? '';
+      size.value = img.size ?? '';
+      base.value = img.baseUrl ?? '';
+      maskKey();
+      if (img.baseUrl && specOf().byok) adv.root.open = true;
+    }
+
+    // The key, model, size and address belong to one vendor. Switching clears them (one vendor's key is never
+    // sent to another), but while Settings stays open, switching back brings the vendor's values back.
+    const VENDOR_FIELDS = ['apiKey', 'baseUrl', 'model', 'size'];
+    const memory = new Map();
+    onChange(
+      vendor,
+      () => {
+        const from = vendorOf();
+        const to = vendor.value;
+        if (to === from && img.vendor === to) return;
+        memory.set(from, Object.fromEntries(VENDOR_FIELDS.map((k) => [k, img[k] ?? ''])));
+        const back = memory.get(to) || {};
+        for (const k of VENDOR_FIELDS) img[k] = back[k] ?? '';
+        img.vendor = to;
+        fill();
+        paint();
+        resetTest();
+      },
+      () => {
+        const old = Object.fromEntries(['vendor', ...VENDOR_FIELDS].map((k) => [k, img[k]]));
+        return () => {
+          Object.assign(img, old);
+          vendor.value = vendorOf();
+          fill();
+          paint();
+          resetTest();
+        };
+      }
     );
-    root.append(c);
+
+    refreshImageProviders = () => {
+      const opts = [['', 'Choose a provider…'], ...settings.providers.filter((p) => p.type === 'openai').map((p) => [p.id, p.name || 'Unnamed provider'])];
+      if (img.providerId && !opts.some(([v]) => v === img.providerId)) {
+        img.providerId = '';
+        commit();
+      }
+      setOptions(imageProvider, opts, img.providerId);
+      paint();
+    };
+
+    testBtn.addEventListener('click', async () => {
+      const run = ++testRun;
+      const say = (kind, text) => {
+        if (run !== testRun) return;
+        testMsg.hidden = false;
+        testMsg.className = `test-result${kind ? ` ${kind}` : ''}`;
+        testMsg.textContent = text;
+      };
+      const v = vendorOf();
+      // OpenAI-compatible: the provider chosen here; the chat model: the one in the header.
+      const prov = v === 'openai' ? settings.providers.find((p) => p.id === img.providerId) || null : activeProvider();
+      if (specOf().byok && !String(img.apiKey || '').trim()) return say('error', 'Enter the API key first.');
+      if (v === 'openai' && !prov) return say('error', 'Choose a provider first.');
+      if (v === 'chat-model' && !prov) return say('error', 'Add a provider in Models & providers first.');
+      testBtn.disabled = true;
+      say('', 'Testing…');
+      try {
+        const m = await import('./image.js');
+        if (typeof m.testImageVendor !== 'function') return say('error', 'Testing is not available in this version.');
+        const r = await m.testImageVendor(img, prov, AbortSignal.timeout(20000));
+        if (r?.ok) say('ok', `✓ ${String(r.info || 'Connected').replace(/^✓\s*/, '')}`);
+        else say('error', errText(r?.error || 'The test failed.'));
+      } catch (e) {
+        say('error', errText(e));
+      } finally {
+        if (run === testRun) testBtn.disabled = false;
+      }
+    });
+
+    const c = card('Image vendor', 'Where the agent gets its pictures from. Changes are saved as you make them.', { id: 'settingsImage' });
+    c.append(field('Vendor', vendor), note, noProviders, providerField, apiField, keyField, modelField, sizeField, actions, testMsg);
+    root.append(c, adv.root);
+
+    refreshImageProviders();
+    fill();
     return { onShow: () => refreshImageProviders() };
   }
 
@@ -1026,6 +1270,203 @@ export function renderSettings(container, settings, opts = {}) {
     return {};
   }
 
+  /* ---------- page: Memory ---------- */
+
+  const MEM_DEFAULT_CHARS = DEFAULTS.memory?.maxInjectChars ?? 4000;
+  const scopeLabel = (scope) => (scope === 'global' ? 'Global' : scope);
+  const memDate = (t) => {
+    const d = new Date(t);
+    return Number.isNaN(d.getTime()) ? '' : d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+  };
+
+  // The origin of the tab the user is looking at ('' when there is none or it is not a website).
+  async function activeOrigin() {
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      return tab?.url ? originOf(tab.url) || '' : '';
+    } catch {
+      return '';
+    }
+  }
+
+  let memRefreshPill = () => {};
+
+  function buildMemory(root) {
+    let all = [];
+    let loaded = false;
+    let siteOrigin = '';
+
+    const enabled = checkbox(settings.memory.enabled);
+    enabled.id = 'memoryEnabled';
+    onChange(
+      enabled,
+      () => {
+        settings.memory.enabled = enabled.checked;
+        memRefreshPill();
+      },
+      keep(settings.memory, 'enabled', enabled, 'checked', () => memRefreshPill())
+    );
+
+    const search = textInput('', 'search', 'Search memories');
+    search.id = 'memorySearch';
+    const scope = selectBox([['all', 'All']], 'all');
+    scope.id = 'memoryScope';
+    const msg = el('div', 'tools-msg memory-msg');
+    msg.id = 'memoryMsg';
+    msg.setAttribute('role', 'status');
+    msg.hidden = true;
+    const say = (text, kind = '') => {
+      msg.className = `tools-msg memory-msg${kind ? ` ${kind}` : ''}`;
+      msg.textContent = text || '';
+      msg.hidden = !text;
+    };
+    const list = el('div', 'memory-list');
+    list.id = 'memoryList';
+    const empty = el('p', 'hint memory-empty', 'Nothing saved yet. The agent will add notes here when it learns something worth keeping.');
+    empty.id = 'memoryEmpty';
+    empty.hidden = true;
+    const status = el('p', 'hint memory-status');
+    status.id = 'memoryStatus';
+    status.setAttribute('role', 'status');
+
+    function memRow(m) {
+      const r = el('div', 'memory-row');
+      r.dataset.memoryId = m.id;
+      const text = el('p', 'memory-text', m.text);
+      text.title = m.text;
+      const meta = el('div', 'memory-meta');
+      meta.append(el('span', `memory-scope${m.scope === 'global' ? ' global' : ''}`, scopeLabel(m.scope)));
+      const when = memDate(m.updatedAt || m.createdAt);
+      if (when) meta.append(el('span', 'memory-date', when));
+      if (m.source === 'user') meta.append(el('span', 'memory-date', 'you asked'));
+      const del = confirmButton('Delete', 'Confirm', async () => {
+        del.disabled = true;
+        try {
+          await memStore.delete(m.id);
+          all = all.filter((x) => x.id !== m.id);
+          say('');
+          const hadFocus = r.contains(document.activeElement);
+          render();
+          memCountChanged();
+          if (hadFocus) search.focus();
+        } catch (e) {
+          del.disabled = false;
+          say(`Could not delete that memory: ${errText(e)}`, 'error');
+        }
+      });
+      del.dataset.role = 'delete';
+      del.setAttribute('aria-label', `Delete memory: ${m.text.slice(0, 60)}`);
+      r.append(text, meta, del);
+      return r;
+    }
+
+    const clearSite = confirmButton('Clear this site', 'Confirm clear', () => doClear({ scope: siteOrigin }, `Cleared the memories for ${siteOrigin}.`));
+    clearSite.id = 'memoryClearSite';
+    clearSite.hidden = true;
+    const clearAll = confirmButton('Clear all', 'Confirm clear all', () => doClear({}, 'Cleared all memories.'));
+    clearAll.id = 'memoryClearAll';
+
+    async function doClear(arg, done) {
+      try {
+        await memStore.clear(arg);
+        say(done, 'ok');
+      } catch (e) {
+        say(`Could not clear: ${errText(e)}`, 'error');
+      }
+      await load(true);
+    }
+
+    // Rebuilds the scope filter from the loaded list, keeping the choice when it still exists.
+    function paintScopes() {
+      const keep = scope.value;
+      const sites = [...new Set(all.map((m) => m.scope).filter((x) => x && x !== 'global'))].sort();
+      setOptions(scope, [['all', 'All'], ['global', 'Global'], ...sites.map((o) => [o, o])], keep);
+      if (scope.value !== keep) scope.value = 'all';
+    }
+
+    function render() {
+      paintScopes();
+      const q = search.value.trim().toLowerCase();
+      const sc = scope.value;
+      const shown = all.filter((m) => (sc === 'all' || m.scope === sc) && (!q || String(m.text).toLowerCase().includes(q)));
+      // Global first, then each site; newest first inside a group (the store already sorts by newest).
+      const groups = [...new Set(shown.map((m) => m.scope))].sort((a, b) => (a === 'global' ? -1 : b === 'global' ? 1 : a.localeCompare(b)));
+      const nodes = [];
+      for (const g of groups) {
+        const h = el('h4', 'memory-group', scopeLabel(g));
+        h.dataset.scope = g;
+        nodes.push(h, ...shown.filter((m) => m.scope === g).map(memRow));
+      }
+      list.replaceChildren(...nodes);
+      empty.hidden = !loaded || all.length > 0;
+      list.hidden = !shown.length;
+      status.hidden = !loaded || !all.length || !!shown.length;
+      status.textContent = 'No memories match.';
+      clearAll.disabled = !all.length;
+      const hasSite = !!siteOrigin && all.some((m) => m.scope === siteOrigin);
+      clearSite.hidden = !hasSite;
+      if (hasSite) clearSite.title = `Delete the memories saved for ${siteOrigin}`;
+    }
+
+    function memCountChanged() {
+      live.memCount = all.length;
+      memRefreshPill();
+    }
+
+    async function load(quiet = false) {
+      if (!quiet) {
+        loaded = false;
+        list.replaceChildren();
+        empty.hidden = true;
+        status.hidden = false;
+        status.textContent = 'Loading…';
+      }
+      siteOrigin = await activeOrigin();
+      try {
+        const items = await memStore.list();
+        all = Array.isArray(items) ? items : [];
+        loaded = true;
+        live.memCount = all.length;
+        memRefreshPill();
+        if (!quiet) say('');
+      } catch (e) {
+        all = [];
+        loaded = true;
+        say(`Could not read the saved memories: ${errText(e)}`, 'error');
+      }
+      render();
+    }
+
+    search.addEventListener('input', render);
+    scope.addEventListener('change', render);
+
+    const maxInject = numberInput(settings.memory.maxInjectChars, { min: 0, step: 500, placeholder: String(MEM_DEFAULT_CHARS) });
+    maxInject.id = 'memoryMaxInject';
+    onChange(
+      maxInject,
+      () => {
+        const raw = maxInject.value.trim();
+        const v = raw === '' ? NaN : Number(raw);
+        settings.memory.maxInjectChars = Number.isFinite(v) ? Math.max(0, Math.round(v)) : MEM_DEFAULT_CHARS;
+        maxInject.value = String(settings.memory.maxInjectChars);
+      },
+      keep(settings.memory, 'maxInjectChars', maxInject)
+    );
+
+    const saved = card('Saved memories', 'Notes the agent keeps between chats. Delete any you do not want it to use.', { id: 'settingsMemory' });
+    const filters = el('div', 'memory-filters');
+    filters.append(field('Search', search), field('Show', scope));
+    const actions = el('div', 'card-actions memory-actions');
+    actions.append(clearSite, clearAll);
+    saved.append(checkField('Use saved memories', enabled, 'When off, the agent is not shown what it saved. Nothing is deleted.'), filters, msg, status, empty, list, actions);
+
+    const adv = advanced('memoryAdvanced');
+    adv.body.append(field('How much to include', maxInject, 'Characters of saved memory added to each request. 0 turns injection off without deleting anything.'));
+
+    root.append(saved, adv.root);
+    return { onShow: () => load() };
+  }
+
   /* ---------- pages ---------- */
 
   const home = el('div', 'settings-home');
@@ -1048,6 +1489,7 @@ export function renderSettings(container, settings, opts = {}) {
     models: buildModels,
     images: buildImages,
     behaviour: buildBehaviour,
+    memory: buildMemory,
     computer: (root) => {
       computer = computerToolsSection(settings, kit, { ...(remote?.hooks || {}), onCheck: companionChecked });
       root.append(computer.root);
@@ -1219,13 +1661,26 @@ export function renderSettings(container, settings, opts = {}) {
     },
     images: () => {
       const img = settings.image || {};
-      const p = img.providerId && settings.providers.find((x) => x.id === img.providerId);
-      return p && img.model ? [`${p.name || 'Unnamed provider'} · ${img.model}`, 'ok'] : ['Off', 'off'];
+      const v = imageVendorOf(img);
+      if (v === 'none') return ['Off', 'off'];
+      const label = IMAGE_VENDORS[v].label || v;
+      const model = String(img.model || '').trim();
+      // Green once it can work: a provider and a model, or a key. Amber while something is still missing.
+      if (v === 'openai') {
+        const p = img.providerId && settings.providers.find((x) => x.id === img.providerId);
+        return [[p ? p.name || 'Unnamed provider' : label, model].filter(Boolean).join(' · '), p && model ? 'ok' : 'warn'];
+      }
+      if (v === 'chat-model') return [label, 'ok'];
+      return [model ? `${label} · ${model}` : label, String(img.apiKey || '').trim() ? 'ok' : 'warn'];
     },
     behaviour: () => {
       const n = Number(settings.maxSteps) || 0;
       const steps = n > 0 ? `max ${plural(n, 'step')}` : 'no step limit';
       return settings.approval === 'auto' ? [`Act without asking · ${steps}`, 'warn'] : [`Ask before acting · ${steps}`, 'info'];
+    },
+    memory: () => {
+      if (!settings.memory.enabled) return ['Off', 'off'];
+      return [live.memCount == null ? 'On' : `On · ${live.memCount} saved`, 'ok'];
     },
     computer: companionPill,
     remote: remotePill,
@@ -1237,6 +1692,13 @@ export function renderSettings(container, settings, opts = {}) {
       return [plural(on, 'server'), 'ok'];
     },
     about: () => [version ? `Version ${version}` : 'Version unknown', 'off'],
+  };
+
+  memRefreshPill = () => {
+    const c = cards.get('memory');
+    if (!c) return;
+    const [text, state] = PILLS.memory();
+    setPill(c.pill, text, state);
   };
 
   function modelReady() {
@@ -1287,6 +1749,17 @@ export function renderSettings(container, settings, opts = {}) {
       } catch {
         setPill(c.pill, 'Unavailable', 'error');
       }
+    }
+    if (recheck && settings.memory.enabled) {
+      Promise.resolve()
+        .then(() => memStore.list())
+        .then(
+          (items) => {
+            live.memCount = Array.isArray(items) ? items.length : null;
+            memRefreshPill();
+          },
+          () => {}
+        );
     }
     try {
       paintStart(recheck);

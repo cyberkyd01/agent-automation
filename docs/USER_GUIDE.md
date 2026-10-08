@@ -2,7 +2,7 @@
 
 Agent Automation is an AI agent that lives in your browser's side panel and works on the website next to it. You describe a job in plain words, and it reads the page, clicks, types, fills in forms, replies to messages, repeats a change across many rows, researches in other tabs, handles files and images, and, with an optional companion program, uses tools on your own computer (including terminals and applications such as Excel and Notepad) and can share your local models with another browser or app.
 
-This guide is for people who run websites or online shops. It explains how to get work done with the agent. The [README](../README.md) is the short overview and has the install steps; this guide goes through the panel, the recipes, every setting and what to do when something goes wrong. It describes version 1.3.
+This guide is for people who run websites or online shops. It explains how to get work done with the agent. The [README](../README.md) is the short overview and has the install steps; this guide goes through the panel, the recipes, every setting and what to do when something goes wrong. It describes version 1.5.
 
 Jump to the section you need. If you are new, read [Before you start](#before-you-start), [A tour of the panel](#a-tour-of-the-panel) and [Working with the agent](#working-with-the-agent) first, then try one recipe.
 
@@ -30,6 +30,11 @@ Jump to the section you need. If you are new, read [Before you start](#before-yo
   - [Stop, Retry and Continue](#stop-retry-and-continue)
   - [Closing the panel](#closing-the-panel)
   - [Long tasks](#long-tasks)
+  - [Memory](#memory)
+    - [The progress log](#the-progress-log)
+    - [Memory across chats](#memory-across-chats)
+    - [Telling it to remember or forget](#telling-it-to-remember-or-forget)
+    - [Keeping context and not repeating work](#keeping-context-and-not-repeating-work)
 - [Recipes](#recipes)
   - [Summarise and analyse a page](#summarise-and-analyse-a-page)
   - [Fill in a form](#fill-in-a-form)
@@ -39,6 +44,7 @@ Jump to the section you need. If you are new, read [Before you start](#before-yo
   - [Research and compare with other websites](#research-and-compare-with-other-websites)
   - [Work across several tabs](#work-across-several-tabs)
   - [Generate and edit images](#generate-and-edit-images)
+  - [Choosing an image vendor](#choosing-an-image-vendor)
   - [Read an attached document and act on it](#read-an-attached-document-and-act-on-it)
   - [Upload a file to a website](#upload-a-file-to-a-website)
   - [Download files](#download-files)
@@ -59,6 +65,7 @@ Jump to the section you need. If you are new, read [Before you start](#before-yo
   - [Tabs](#tabs)
   - [Web and research](#web-and-research)
   - [Files and images](#files-and-images)
+  - [Memory tools](#memory-tools)
   - [Computer tools (companion)](#computer-tools-companion)
   - [Desktop tools (companion)](#desktop-tools-companion)
   - [Terminal tools (companion)](#terminal-tools-companion)
@@ -69,6 +76,7 @@ Jump to the section you need. If you are new, read [Before you start](#before-yo
   - [Models & providers](#models--providers)
   - [Images](#images)
   - [Behaviour](#behaviour)
+  - [Memory settings](#memory-settings)
   - [Computer tools settings](#computer-tools-settings)
   - [Remote access settings](#remote-access-settings)
   - [Remote MCP servers](#remote-mcp-servers)
@@ -112,6 +120,7 @@ Jump to the section you need. If you are new, read [Before you start](#before-yo
   - [The agent misbehaves](#the-agent-misbehaves)
   - [Pages and clicking](#pages-and-clicking)
   - [Files](#files)
+  - [Image problems](#image-problems)
   - [Chats and storage](#chats-and-storage)
   - [Computer tools problems](#computer-tools-problems)
   - [Desktop tools problems](#desktop-tools-problems)
@@ -269,7 +278,7 @@ The extension's icon in the browser toolbar opens the panel, and clicking it aga
 
 ### The Settings screen
 
-Click the sliders icon in the header. Settings opens on a home page, not on one long list. At the top is a **Getting started** card, and below it is one card for each area: Models & providers, Images, Behaviour, Computer tools, Remote access, Remote MCP servers, and About & help. Each card has a short description and a status pill that shows the state at a glance, such as "LM Studio · qwen/qwen3-30b-a3b" or "Connected · 31 tools".
+Click the sliders icon in the header. Settings opens on a home page, not on one long list. At the top is a **Getting started** card, and below it is one card for each area: Models & providers, Images, Behaviour, Memory, Computer tools, Remote access, Remote MCP servers, and About & help. Each card has a short description and a status pill that shows the state at a glance, such as "LM Studio · qwen/qwen3-30b-a3b" or "Connected · 31 tools".
 
 <img src="images/settings-home.png" alt="The Settings home page: a Getting started card with three numbered steps (Connect a model, Try a task, Optional: computer tools, remote access), then cards for Models & providers (amber pill 'No model chosen'), Images (grey pill 'Off') and Behaviour (blue pill 'Ask before acting · no step limit'), each with an icon and a one-line purpose." width="400">
 
@@ -384,6 +393,58 @@ Upgrading from version 1.1: if **Max steps** still had the old default of 40, it
 
 You can also split big work yourself: ask for 20 rows at a time, or use [Batch jobs](#batch-jobs), where every job is its own request.
 
+### Memory
+
+Version 1.5 gives the agent two kinds of memory, so a long job does not repeat itself and a new chat does not start from nothing. Both are stored on this computer. You do not need to switch anything on: they work from the first task, and the agent maintains them itself. You review and delete what it saved in [Memory settings](#memory-settings).
+
+#### The progress log
+
+During a long or bulk job (hundreds of rows, a long list of enquiries) the agent keeps a short running note of what it has done and what is left. It writes the note with the `update_progress` tool, and each update replaces the previous note.
+
+- The note belongs to the chat. It is saved with the chat and comes back when you reopen the chat from History.
+- It is given to the model on every request, **even after older messages have been trimmed** to fit the Context budget. That is what stops a long job from starting the finished items again.
+- It is capped at about 8,000 characters. If it grows past that, the middle is cut ("…[older progress trimmed]") and the start and the end are kept.
+- There is no separate panel that shows the note in version 1.5. You see the agent update it as a tool card in the chat, and it is used by the model. If you want to see where it has got to, ask: "Where are you on this job?"
+
+#### Memory across chats
+
+The agent can save a lasting fact so that later chats can use it. A saved memory has a **scope**:
+
+| Scope | Meaning | Shown in Settings as |
+|---|---|---|
+| **Global** | True everywhere, for example "Our refund window is 30 days." | **Global** |
+| **A website** | True for one site only, for example "Orders are under Shop > Orders." The site is the one in the active browser tab when it is saved. | The site's address, such as `https://shop.example.com` |
+
+- **It saves them itself** when it learns something worth keeping, or when you ask. The default scope is the website. If the active tab has no website (a blank tab, a browser page), it saves the fact as Global and tells you so.
+- **They are added to each run.** At the start of every request, the agent is shown your Global memories and the memories for the website in the active tab, newest first. So a brand-new chat already knows them. Memories for other websites are not shown unless the agent looks them up with `recall`.
+- **How much is added** is set by **How much to include** in Memory settings (Advanced): 4,000 characters by default. If more is saved, the newest ones are included first and the rest are left out of that request. They are not deleted.
+- **A memory is plain text** of at most 2,000 characters. Saving the same note again in the same scope refreshes it instead of adding a copy.
+- **At most 200 are kept.** When the 200 are full and a new one is saved, the oldest note the agent wrote is dropped; notes you asked for with "remember" are kept as long as any agent-written one can go instead.
+- **Private and local.** Memories are stored unencrypted in the extension's local storage in your browser profile, like your settings. They leave your computer only the way anything in a chat does: the ones added to a request go to your model provider. With a cloud model, do not ask it to remember secrets. Removing the extension removes them.
+
+#### Telling it to remember or forget
+
+Say it in plain words:
+
+- "Remember that our refund window is 30 days." (saved as Global if it is about your business in general)
+- "Remember for this site that product codes start with SKU-."
+- "What do you remember about this site?" (it uses `recall`)
+- "Forget that." or "Forget what you saved about the refund window." (it finds the note with `recall`, then removes it with `forget`)
+
+Check what was saved in Settings → Memory. If a note is wrong, delete it there or ask the agent to forget it. A model that is not good at tool calling may ignore a request to remember; the card in the chat shows whether the tool ran ("Remembered globally." or "Remembered for https://…").
+
+#### Keeping context and not repeating work
+
+| You want | What gives it to you |
+|---|---|
+| The agent to remember earlier steps in this chat | Nothing to do. The whole chat is sent to the model, within the **Context budget**. |
+| A long job not to repeat finished items | The progress log, which is never trimmed. For a very long job, you can ask: "Keep your progress note up to date as you go." |
+| To carry on a job later | Open the chat again from [History](#history); its messages and progress note are all there. Press **Continue** if it was interrupted. |
+| A new chat to know your standing facts | Ask the agent to remember them, once. Every later chat starts with them. |
+| A new chat to know what an old chat did | Open the old chat from History, or ask the agent in the old chat to remember the result as a note. |
+
+The one real limit is the **Context budget**: on a very long chat, older messages and tool output are shortened for the model to fit (the chat itself keeps everything). The progress log and saved memories are how important facts survive that trimming. A new chat per job is still the cleanest way to start.
+
 ## Recipes
 
 Each recipe gives a prompt you can copy and change, and what to expect. All examples assume **Ask before acting**.
@@ -443,13 +504,45 @@ The agent lists your tabs, switches by name and reads each. You see each switch 
 
 ### Generate and edit images
 
-First set up an image model once: Settings → [Images](#images).
+First choose where the pictures come from, once: Settings → [Images](#images). The quickest choice is **Your main chat model**: if the model in the panel header can output images, nothing else is needed. If it cannot, pick a vendor and paste its API key. [Choosing an image vendor](#choosing-an-image-vendor) explains the options.
 
 > Take the main product photo on this page, remove the busy background and make it plain white. Show me the result.
 
 > Generate a 1200x630 banner for this article, with the title "Autumn desk lamps", and show it to me.
 
 Results appear as image cards in the chat with **Download** and **Attach** buttons. To see an image in place on the page, add: "Show it on the page." The agent replaces the picture visually; this is a **preview only**, and nothing is saved on the site. To really put it on the site, add: "Then upload it to the cover image field." The agent uses the site's own upload field and asks you first, like any upload.
+
+Two things depend on the vendor and the model: whether a picture can be edited at all, and whether a size is followed. Stability AI and Google turn a size such as 1200x630 into the nearest aspect ratio they offer (here 16:9), so the picture may not have exactly those pixels. If an image tool fails, its card shows the reason, starting with the vendor's name; see [Image problems](#image-problems). The image tools do not ask for approval, and a hosted vendor charges for each picture, so before a long list of pictures ask for one and check it.
+
+### Choosing an image vendor
+
+The agent makes and edits pictures with the vendor you choose in Settings → [Images](#images). **It can already do this with your main chat model, if that model supports image output.** There are three kinds of choice. Use the first one that fits.
+
+**Your main chat model.** Choose **Your main chat model** and there is nothing else to set: no key and no model name. The agent asks the model in the panel header for the picture as part of a normal chat request, and sends it the picture to change when you ask for an edit. This works only if that model can produce images, for example some Gemini image models through OpenRouter. A text-only model answers in words, and the tool then says it returned no image. Your description and any picture to edit go to your chat provider, as everything else does.
+
+**OpenAI-compatible provider.** Use it when one of the OpenAI-compatible providers you already added under Models & providers (OpenAI, OpenRouter, LocalAI and so on) offers an image model you want to use instead of your chat model. You pick the provider, the **API mode** and the **Model** (for example `gpt-image-1`). Its address and API key are the ones you already gave that provider.
+
+**A hosted vendor with your own key.** Stability AI, fal.ai, Replicate and Google (Gemini / Imagen) each need an account with that vendor and an API key from it ("bring your own key"). Use one when you want that vendor's models, or already have an account.
+
+1. In Settings → **Images**, choose the vendor in the **Vendor** list.
+2. Click **Get a key**. It opens the vendor's page for API keys (Stability AI: platform.stability.ai → API Keys. fal.ai: fal.ai → Dashboard → Keys. Replicate: replicate.com → Account → API tokens. Google: aistudio.google.com → Get API key). Create a key and copy it.
+3. Paste it into **API key**. It is hidden; **Show** reveals it.
+4. Leave **Model** blank to use the first suggestion, or pick another one or type a model ID. Then click **Test**.
+
+The key is stored with your other settings, unencrypted, in this browser's local storage on this computer, and it is sent only to that vendor: never to your chat model's provider, and never into a chat. The vendor charges the account the key belongs to, for each picture. If the vendor lets you, give the key a spending limit.
+
+What the vendors do with editing and size:
+
+| Vendor | Editing | Size |
+|---|---|---|
+| **Your main chat model** | The picture goes into the chat request. Works if the model can take and return images. | Not used. |
+| **OpenAI-compatible provider** | **Images API** mode uses `/images/edits`. **Chat completions** mode puts the picture in the chat request. The model must support it. | Sent as typed, for example `1024x1024`, in **Images API** mode. Not used in chat mode. |
+| **Stability AI** | Image to image: your picture and your instruction go in, a new picture comes out. | Becomes the nearest aspect ratio (for example `16:9`), when generating only. |
+| **fal.ai** | Your picture is sent to the model as its input image, so pick an image-to-image model, for example `fal-ai/flux/dev/image-to-image`. | Width and height are passed to the model, which may ignore them. There is no **Size** field on the page; name a size in your request. |
+| **Replicate** | Your picture is sent to the model as its `image` input, so the model must take an input image. | Width and height are passed to the model, which may ignore them. There is no **Size** field on the page; name a size in your request. |
+| **Google (Gemini / Imagen)** | Gemini image models edit. Imagen models only generate; for an edit the agent uses `gemini-2.5-flash-image` instead. | Becomes the nearest aspect ratio, when generating only. |
+
+The **Size** setting is a default, used when your request names no size. Replicate and fal.ai start the picture and the agent waits for it, up to about three minutes.
 
 ### Read an attached document and act on it
 
@@ -670,10 +763,21 @@ The agent works by calling tools: small, named abilities. You do not call them y
 | `read_file` | Reads the text of an attached or created file, or of a file at a web address. Handles text, PDF, Word, Excel and PowerPoint. Long text is read in pages. | No | "Read the rest of the attached PDF." |
 | `upload_file` | Puts a file or image into a file field on the page. | Yes | "Upload the attached photo to the product image field." |
 | `download` | Saves a file or image to your Downloads folder. | Yes | "Download the banner you made." |
-| `generate_image` | Creates an image from a description. Needs an image model in Settings → Images. | No | "Generate a banner for this article." |
-| `edit_image` | Changes an image as you describe. The source can be an image on the page, an attachment or a screenshot. | No | "Remove the background from the main product photo." |
+| `generate_image` | Creates an image from a description, with the vendor set in Settings → Images (with **None**, it tells you to set one up there). Whether a size is followed depends on the vendor. | No | "Generate a banner for this article." |
+| `edit_image` | Changes an image as you describe, with the same vendor. The source can be an image on the page, an attachment or a screenshot. Not every vendor and model can edit: see [Choosing an image vendor](#choosing-an-image-vendor). | No | "Remove the background from the main product photo." |
 | `view_image` | Looks at an image (vision models only). | No | "Look at the attached photo and describe any damage." |
 | `set_page_image` | Replaces an image on the page, as a preview only (images up to 32 MB). Nothing is saved on the site. | No | "Show the new banner in place of the old one." |
+
+### Memory tools
+
+| Tool | What it does | Asks? | Example request |
+|---|---|---|---|
+| `update_progress` | Replaces the chat's progress note with a short summary of what is done and what is left. The note is kept even when older messages are trimmed. The agent uses it by itself on long or bulk jobs. | No | "Go through all 300 rows and keep a note of how far you got." |
+| `remember` | Saves a lasting fact to memory across chats. The scope is **Global** (everywhere) or the website in the active tab (the default). | No | "Remember that our refund window is 30 days." |
+| `recall` | Looks up saved memories, all of them, only Global, or only this site, optionally filtered by words. Shows each note's id. | No | "What do you remember about this site?" |
+| `forget` | Deletes one saved memory, by the id that `recall` shows. | No | "Forget the note about the refund window." |
+
+None of these ask for approval in either approval mode, because they only read and write local notes. See [Memory](#memory).
 
 ### Computer tools (companion)
 
@@ -754,7 +858,7 @@ A tool call that takes longer than five minutes is cancelled. If a server cannot
 
 Open Settings with the sliders icon. It opens on a home page with one card for each area. Click a card to open that area on its own page; **‹ Settings** at the top left (or **Esc**) goes back to the home page. "Changes are saved automatically." Two parts save differently: the companion's own settings under Computer tools (shell, files, timeout and local MCP servers) have an **Apply** button, and the Remote access switches, the Desktop tools switch and the Terminal sessions settings are sent to the companion the moment you change them.
 
-Every area page follows the same pattern. It starts with a **What this does** note. Its controls are grouped into cards, each with a heading and a one-line hint. Settings you rarely need, or that can cause harm, are folded under **Advanced** at the bottom of the page (on Behaviour and on Remote access). The areas appear in this order: Models & providers, Images, Behaviour, Computer tools, Remote access, Remote MCP servers, and About & help.
+Every area page follows the same pattern. It starts with a **What this does** note. Its controls are grouped into cards, each with a heading and a one-line hint. Settings you rarely need, or that can cause harm, are folded under **Advanced** at the bottom of the page (on Behaviour, on Images for a hosted vendor, and on Remote access). The areas appear in this order: Models & providers, Images, Behaviour, Memory, Computer tools, Remote access, Remote MCP servers, and About & help.
 
 ### The Settings home page
 
@@ -773,12 +877,13 @@ The home page has a **Getting started** card at the top and one card for each ar
 | Card | Purpose line | What the pill says |
 |---|---|---|
 | **Models & providers** | Where the AI comes from. | The provider in use and its model, such as "LM Studio · qwen/qwen3-30b-a3b". "No provider" or "No model chosen" when one is missing. Red, with "· not reachable" added, when the last **Test connection** failed. |
-| **Images** | Create and edit images. | The image provider and model, or "Off". |
+| **Images** | Create and edit images. | "Off", or the vendor you chose and its model when one is set, such as "Your main chat model" or "Stability AI · sd3.5-large". Amber while the vendor still needs something: an API key, or a provider and a model. |
 | **Behaviour** | Approvals, queue, limits, notifications. | "Ask before acting" or "Act without asking", then the step limit: "Ask before acting · no step limit". |
+| **Memory** | What the agent remembers across chats. | "Off" when **Use saved memories** is off, otherwise "On · 3 saved" (the number of saved memories). |
 | **Computer tools** | Let the agent use this computer: commands, files, terminals, apps. | "Not set up", "Switched off", "Checking…", "Connected · 31 tools", "Not running", "Wrong token" or "Error". |
 | **Remote access** | Use your local models and tools from another browser or device. | "Needs computer tools", "Stopped", "Starting…", "Running" or "Error". |
 | **Remote MCP servers** | Tools from servers on the internet. | "None", "All switched off", or the number of servers, such as "1 server". |
-| **About & help** | Version, user guide, feedback. | "Version 1.3.0". |
+| **About & help** | Version, user guide, feedback. | "Version 1.5.0". |
 
 The pills only report. The companion is checked again when you open the home page, so a pill can say "Checking…" for a moment.
 
@@ -822,16 +927,46 @@ Changing a provider's type or base URL clears its stored model list; reload it f
 
 ### Images
 
-"Create and edit images." This lets the agent make pictures from a description and change images you attach. It needs an OpenAI-compatible provider that offers an image model. The page has one card, **Image model** ("Only OpenAI-compatible providers can be picked. Leave the provider at None to switch image tools off.").
+"Create and edit images." This lets the agent make pictures from a description and change images you attach. **The agent can already do this with your main chat model, if that model supports image output:** choose **Your main chat model**. Choose another vendor only if your workflow needs one; [Choosing an image vendor](#choosing-an-image-vendor) helps you pick.
 
-| Field | Meaning | Default |
-|---|---|---|
-| **Provider** | Which provider makes the images. **None (image tools off)** means no image model is set, so the image tools report an error. If you have no OpenAI-compatible provider yet, the card says so and has an **Open Models & providers** button. | None (image tools off) |
-| **Model ID** | The image model's name, for example `gpt-image-1`. | Empty |
-| **API mode** | **Images API (/images/generations, /images/edits)** for services with those endpoints (OpenAI, LocalAI). **Chat completions with image output** for chat models that return images (for example Gemini image models through OpenRouter). | Images API |
-| **Size** | For example `1024x1024`. Leave blank for the model's default. | Blank |
+The page has an **Image vendor** card ("Where the agent gets its pictures from. Changes are saved as you make them.") and, for the four hosted vendors, an **Advanced** card below it. The fields shown depend on the **Vendor**.
 
-On the home page the Images pill reads "Off" until a provider and a model are set. Images are made by the provider you choose here. With a cloud provider, your description (and any image you ask it to edit) is sent to that provider.
+<img src="images/settings-images.png" alt="Settings, Images page, with the vendor set to Stability AI: the 'What this does' note, an Image vendor card with the Vendor list, an API key field (hidden as dots) with a Show button, the hint 'Stored in this browser only, and sent only to Stability AI.', a Get a key link with 'platform.stability.ai → API Keys', a Model field (sd3.5-large) with the hint 'Pick one of the suggestions or type any model ID. Blank uses the default.', a Size field and a Test button; below it an Advanced card with the hint 'Change this only to use a proxy or a server you run yourself.' and a Base URL field (here holding a local test address) with the hint 'Blank uses https://api.stability.ai.'" width="400">
+
+The **Vendor** list:
+
+| Vendor | What it does |
+|---|---|
+| **None (image tools off)** | The default. The image tools tell you to set it up in Settings → Images. |
+| **Your main chat model** | Uses the provider and model selected in the panel header, when that model can output images. The page says "Uses the model selected in the panel header, when it can output images." and has no other field. |
+| **OpenAI-compatible provider** | Uses one of your OpenAI-compatible providers, with an image model on it. |
+| **Stability AI**, **fal.ai**, **Replicate**, **Google (Gemini / Imagen)** | Use the vendor's own service with your own API key. |
+
+| Field | Shown for | Meaning | Default |
+|---|---|---|---|
+| **Vendor** | Always | Which of the vendors above makes the images. | None (image tools off) |
+| **Provider** | OpenAI-compatible provider | One of your OpenAI-compatible providers, taken from Models & providers. Its address and API key are used. If you have none yet, the card says "There is no OpenAI-compatible provider yet. Add one first, for example OpenAI or OpenRouter." and has an **Open Models & providers** button. | Choose a provider… |
+| **API mode** | OpenAI-compatible provider | **Images API (/images/generations, /images/edits)** for services with those endpoints (OpenAI, LocalAI). **Chat completions with image output** for chat models that return images (for example Gemini image models through OpenRouter). | Images API |
+| **API key** | The four hosted vendors | Your key for that vendor. It is shown as dots; **Show** reveals it and **Hide** covers it again. The hint says "Stored in this browser only, and sent only to" the vendor. **Get a key** opens the vendor's page for API keys, and the text after it says where to find the key there. | Empty |
+| **Model** | OpenAI-compatible provider and the four hosted vendors | The image model's ID. For an OpenAI-compatible provider, the model your provider offers, for example `gpt-image-1`; it has no default, and the tools ask you to enter one. For a hosted vendor, pick one of the suggestions or type any model ID; blank uses the first suggestion. | Empty |
+| **Size** | OpenAI-compatible provider, Stability AI, Google | Optional. For example `1024x1024` for an OpenAI-compatible provider, or an aspect ratio such as `16:9` for Stability AI and Google. It is used when your request names no size. Leave blank for the model's default. | Blank |
+| **Test** | Every vendor except None | Checks the setting without making a picture. It answers "✓ …" or the reason it failed, and the answer goes away when you change a field. | |
+| **Base URL** | The four hosted vendors, under **Advanced** | Change this only to use a proxy or a server you run yourself. Blank uses the vendor's own address: `https://api.stability.ai`, `https://fal.run`, `https://api.replicate.com` or `https://generativelanguage.googleapis.com`. | Blank |
+
+The models suggested for each hosted vendor, in the order the **Model** field offers them:
+
+| Vendor | Suggested models |
+|---|---|
+| **Stability AI** | `core`, `ultra`, `sd3.5-large`, `sd3.5-large-turbo`, `sd3.5-medium` |
+| **fal.ai** | `fal-ai/flux/dev`, `fal-ai/flux/schnell`, `fal-ai/flux-pro/v1.1`, `fal-ai/flux/dev/image-to-image`, `fal-ai/fast-sdxl` |
+| **Replicate** | `black-forest-labs/flux-dev`, `black-forest-labs/flux-schnell`, `black-forest-labs/flux-1.1-pro`, `stability-ai/sdxl`. Any `owner/name`, or `owner/name:version` for one version, also works. |
+| **Google (Gemini / Imagen)** | `gemini-2.5-flash-image` (the default), `imagen-4.0-generate-001`, `imagen-4.0-ultra-generate-001`. Google has retired Imagen 3, so a Gemini image model is the default. Imagen 4 works where your Google key has access to it. |
+
+How **Test** answers: for **Stability AI**, **Replicate** and **Google** it asks the vendor whether the key is accepted ("✓ API key accepted by Stability AI (model core)."). **fal.ai** has no cheap check, so it only says the key is stored and will be checked the first time you make a picture. For **Your main chat model** and **OpenAI-compatible provider** it checks that the server answers; it cannot tell whether the model can make pictures.
+
+The key, model, size and Base URL belong to one vendor. Switching vendor clears them, so one vendor's key is never sent to another. If you switch back while Settings is still open they come back; otherwise enter them again. Settings saved by version 1.3 carry over: a provider you had chosen for images shows as **OpenAI-compatible provider**, with its model, API mode and size unchanged.
+
+On the home page the Images pill reads "Off" while the vendor is **None (image tools off)**. Otherwise it names the vendor and, when one is set, the model: "Your main chat model", "Stability AI · sd3.5-large", or the provider's name and model for an OpenAI-compatible provider. It is green when the vendor can work (the main chat model; a provider with a model; a hosted vendor with a key) and amber while something is missing. Pictures are made by the vendor you choose here, so your description, and any image you ask it to edit, are sent to that vendor (to your chat provider, for **Your main chat model**).
 
 ### Behaviour
 
@@ -855,6 +990,24 @@ On the home page the Images pill reads "Off" until a provider and a model are se
 | | **Trusted input events** | Uses Chrome's debugger to send real mouse and keyboard events, for sites that ignore simulated ones. Chrome shows a debugging banner while it is active. Not available in Firefox. | Off |
 
 On the home page the pill shows the approval mode and the step limit. It turns amber for **Act without asking**.
+
+### Memory settings
+
+<img src="images/settings-memory.png" alt="The Settings Memory page: a 'What this does' note, a Saved memories card with a 'Use saved memories' checkbox, a Search box and a 'Show' scope filter, and a GLOBAL group listing a saved note 'Company HQ is in Berlin' with a Delete button." width="400">
+
+"What the agent remembers across chats." The agent saves lasting facts itself and keeps a progress note inside each chat (see [Memory](#memory)). This page is where you review and delete what it saved. The home-page pill reads "On · 3 saved" (the count of saved memories), or "Off" when **Use saved memories** is off. The page has a **Saved memories** card ("Notes the agent keeps between chats. Delete any you do not want it to use.") and, folded below it, **Advanced**.
+
+| Where | Field or button | Meaning | Default |
+|---|---|---|---|
+| **Saved memories** | **Use saved memories** | When off, the agent is not shown what it saved, and the pill reads "Off". Nothing is deleted. The agent can still save and look up notes. | On |
+| | **Search** | Shows only memories whose text contains what you type. | Empty |
+| | **Show** | **All**, **Global**, or one website that has memories. | All |
+| | The list | Every saved memory under a heading, **Global** first and then each website. Each has its text, its date, "you asked" when you told the agent to remember it, and a **Delete** button that needs a second click (**Confirm**). "Nothing saved yet. The agent will add notes here when it learns something worth keeping." shows when the list is empty. | |
+| | **Clear this site** | Deletes the memories for the website in your active browser tab. Second click: **Confirm clear**. Only appears when that site has memories. | |
+| | **Clear all** | Deletes every memory. Second click: **Confirm clear all**. | |
+| **Advanced** (folded) | **How much to include** | The number of characters of saved memory added to each request. `0` adds nothing without deleting anything. | 4000 |
+
+The list refreshes when you open the page. If the agent saves something while Settings is open, close the page and open it again.
 
 ### Computer tools settings
 
@@ -1296,14 +1449,15 @@ A quick tunnel is the right choice for most people. A named tunnel keeps one fix
 Everything is stored on your computer, in your Chrome profile:
 
 - **Settings, including API keys and the companion token**, are stored unencrypted in the extension's local storage.
+- **Saved memories** (see [Memory](#memory)) are stored unencrypted in the extension's local storage, at most 200. Delete them in Settings → Memory.
 - **Chats, their queues and their files** are stored unencrypted in the extension's browser database. Deleting a chat in History removes it and its files. Removing the extension removes everything it stored.
 - The **companion** keeps its token, settings and a log in `~/.agent-automation/`. If you use remote access, it also keeps its own copy of `cloudflared` there (in `bin/`) and the tunnel's log, `tunnel.log`. A named tunnel's token is stored in `companion.json`.
 - **Desktop notifications** show text from your chats (the name of an action, the first part of an answer) in your operating system's notification area. Turn them off in Settings → Behaviour if others can see your screen.
 
 ### What leaves your computer
 
-- **To your model provider:** the text of your messages, the text of pages the agent reads, screenshots, and the text of attached files, plus results of the tools it uses. With LM Studio or Ollama on your computer, this stays on your computer. With a cloud provider it goes to that company, under its terms. Do not point a cloud model at pages you must keep confidential.
-- **To the image provider** you choose, the description and any image to edit.
+- **To your model provider:** the text of your messages, the text of pages the agent reads, screenshots, and the text of attached files, plus results of the tools it uses, the chat's progress note and the saved memories added to the request. With LM Studio or Ollama on your computer, this stays on your computer. With a cloud provider it goes to that company, under its terms. Do not point a cloud model at pages you must keep confidential.
+- **To the image vendor** you choose in Settings → Images, the description and any image to edit. That is your chat provider for **Your main chat model**, the provider you picked for **OpenAI-compatible provider**, or Stability AI, fal.ai, Replicate or Google. A hosted vendor also gets your API key for it, and nobody else does.
 - **Web search** sends the search words to DuckDuckGo or Bing, from your browser.
 - **Fetching a page** (`fetch_url`) uses your browser's logins for that site, so the agent can read pages you can read.
 - **To MCP servers** you add, whatever the agent passes to their tools.
@@ -1334,7 +1488,7 @@ Practical advice:
 
 ### API keys and tokens
 
-API keys are stored in the extension's local storage on this computer, unencrypted, and are sent only to the provider you set them for. Anyone who can use your computer account or your Chrome profile can read them. Use keys with spending limits and rotate a key if you think it leaked. Never paste a key into a chat message or a **Custom instructions** box: those go to the model. The companion token works like a password for your computer, so do not share it. The connection code from Remote access contains the token and the tunnel link, so it needs the same care. Do not run the companion with `--host` to listen on your network; anyone with the token could then run commands as you.
+API keys are stored in the extension's local storage on this computer, unencrypted, and are sent only to the provider you set them for. That includes the key for an image vendor in Settings → Images, which goes only to that vendor. Anyone who can use your computer account or your Chrome profile can read them. Use keys with spending limits and rotate a key if you think it leaked. Never paste a key into a chat message or a **Custom instructions** box: those go to the model. The companion token works like a password for your computer, so do not share it. The connection code from Remote access contains the token and the tunnel link, so it needs the same care. Do not run the companion with `--host` to listen on your network; anyone with the token could then run commands as you.
 
 ### Permissions the extension asks for
 
@@ -1370,7 +1524,11 @@ Chrome shows that the extension can read and change data on all websites. That i
 | It ignores tools, loops, repeats itself or invents results | The model's context window is too small, so the tool list was cut off, or the model is not strong enough. | Raise the context length to at least 16k, ideally 32k (see [Local models](#local-models-set-the-context-window)), or use a stronger model that supports tool calling. |
 | Writes tool calls as plain text | The model has no native tool calling. | Settings → Behaviour → **Tool calling**: leave on **Auto** or choose **Prompted (for models without tool support)**. A model with real tool calling is better. |
 | Context-length errors from a small model | The chat plus tools is larger than the window. | Lower **Context budget (chars)** (Settings → Behaviour → Advanced), or start a new chat. |
-| A long chat seems to forget the start | Older tool output is trimmed to fit the **Context budget**. The chat itself keeps everything. | Start a new chat for a new job, and repeat the facts that matter. |
+| A long chat seems to forget the start | Older tool output is trimmed to fit the **Context budget**. The chat itself keeps everything. | Start a new chat for a new job, and repeat the facts that matter, or ask the agent to remember them (see [Memory](#memory)). |
+| It repeated work on a long task | The older steps were trimmed from what the model sees, and the progress note was missing or out of date. | Ask it to "keep your progress note up to date" and carry on; raise **Context budget (chars)** if your model's window allows it; for very long jobs, split the work into batches. See [The progress log](#the-progress-log). |
+| It forgot something from another chat | Each chat starts fresh; only saved memories carry over, and only Global ones and ones for the site in the active tab. | Reopen the old chat from [History](#history), or tell the agent "remember that …". Check Settings → Memory that **Use saved memories** is on and **How much to include** is not 0. |
+| It remembers something wrong or old | A saved memory is out of date. | Settings → Memory: delete it, or ask the agent to forget it. |
+| I want memory off, or cleared | You no longer want it to use what it saved. | Settings → Memory: switch **Use saved memories** off (nothing is deleted), or use **Clear this site** or **Clear all**. |
 | "The model returned an empty response." | The model produced nothing. | Press **Retry**, or try again. If it keeps happening, try a different model. |
 | "Step limit reached (N). Send "continue" to keep going." | You set **Max steps per prompt** to a number, and the request used it up. | Type `continue`, raise **Max steps per prompt**, or set it to `0` for no limit. |
 | It keeps trying the same failing thing | The model is stuck. After three identical failures it is told to try something else, but nothing forces it to. | Press **Stop**, say what to do differently, or use a stronger model. See [Long tasks](#long-tasks). |
@@ -1402,9 +1560,28 @@ Chrome shows that the extension can read and change data on all websites. That i
 | "Binary file — it cannot be read as text, but it can be uploaded or downloaded." | The file is not a document type the agent can read. | Use it for uploads and downloads only. |
 | It says it cannot see an attached image | The model has no vision. | Use a vision model, or describe the image. |
 | "The file is too large (…; the limit is 100 MB)" from `fetch_url` | The web file is over the limit. | Use `download` or open the file in a tab. |
-| "No image model configured…" | No image model is set. | Settings → Images: choose a provider (not **None**) and enter a **Model ID**. |
 | The agent reads only part of a long file | By design: it reads pages as needed. | Ask for the part you need: "read the section about shipping". |
 | Upload does not stick | The site needs a click after the file is chosen, or uses a custom upload box. | Name the exact field, and ask it to click the site's upload button afterwards. |
+
+### Image problems
+
+When an image tool fails, its card shows the reason. A message from a vendor starts with the vendor's name and the vendor's own words, and often ends with a hint.
+
+| What you see | Cause | Fix |
+|---|---|---|
+| "No image model configured — open Settings → Images and choose a vendor." | **Vendor** is still **None (image tools off)**. | Settings → Images: choose a vendor. **Your main chat model** needs nothing else. |
+| "Add your Stability AI API key in Settings → Images." (or fal.ai, Replicate, Google) | A hosted vendor is chosen but the **API key** is empty. | Paste your key. **Get a key** opens the vendor's page. The Images pill on the Settings home page is amber until it is there. |
+| "The OpenAI-compatible provider for images is not set…" or "No image model is set…" | **OpenAI-compatible provider** is chosen but **Provider** or **Model** is empty. | Choose a provider (add one under Models & providers if the list is empty) and enter a **Model**. |
+| "No chat model selected — pick a provider and model in the panel header…" | **Your main chat model** is chosen but the header has no model. | Choose a provider and a model in the panel header. |
+| "your chat model returned no image. It replied: …" (or "…returned no image" from another vendor) | The model answered in words. A text-only chat model cannot make pictures, and a vendor model may refuse the request. | Read what it replied. Choose a model that can output images, or another vendor. |
+| "Stability AI: HTTP 401: … — check the API key for Stability AI." (or HTTP 403, or another vendor's name) | The vendor did not accept the **API key**: it is wrong, expired, deleted, or belongs to another service. | Create a key on the vendor's page (**Get a key**), paste it again in Settings → Images and click **Test**. |
+| "… did not recognise that model or endpoint; check the model id and base URL." (HTTP 404) | The **Model** ID is misspelt or your key cannot use it, or the **Base URL** is wrong. | Pick one of the suggested models, or copy the ID exactly from the vendor. Clear **Base URL** under **Advanced** unless you use a proxy. |
+| "… rate limit reached; wait a moment and try again." (HTTP 429), or "… had a server error; try again shortly." | The vendor is limiting or struggling. | Wait a moment and ask again. |
+| "Cannot reach Stability AI at https://… (…)" | No internet, a firewall, or a wrong **Base URL**. | Check the connection. Clear **Base URL** under **Advanced** unless you use a proxy or your own server. |
+| "Replicate timed out while generating the image." (or fal.ai) | The model took more than about three minutes to answer. | Ask again, or choose a faster model. |
+| An edit fails, or the result ignores your picture | Not every model can edit a picture. fal.ai and Replicate pass your picture to the model as an input, which a text-to-image model may reject or ignore. An OpenAI-compatible provider may not offer `/images/edits`. Imagen models only generate. | Choose a model that edits: for fal.ai an image-to-image model such as `fal-ai/flux/dev/image-to-image`, for Google a Gemini image model such as `gemini-2.5-flash-image`. Otherwise ask for a new picture instead of an edit. See [Choosing an image vendor](#choosing-an-image-vendor). |
+| The picture is not the size you asked for | Stability AI and Google round a size to an aspect ratio, and other models may ignore a size. | Ask for the ratio you need (for example 16:9). If you need exact pixels, resize the picture afterwards in an image editor. |
+| **Test** says "✓" but pictures still fail | **Test** only checks the key and the address; for **fal.ai** it checks nothing until the first picture, and for a chat model or an OpenAI-compatible provider it cannot tell if the model makes pictures. | Ask for one picture and read the error on the tool card. |
 
 ### Chats and storage
 
@@ -1523,13 +1700,15 @@ Chrome shows that the extension can read and change data on all websites. That i
 
 **Can it log in for me or solve a CAPTCHA?** It works in your browser, so sites you are already logged in to are open to it. It will not enter passwords unless you give them in the chat, and when it hits a login or a CAPTCHA it stops and tells you what it needs.
 
+**Does the agent remember things between chats?** Only what it saved as a memory. Within a chat it has the whole conversation and a progress note; across chats it has your Global memories and those for the current website. You can tell it "remember that …" and "forget …", and you manage the list in Settings → Memory. See [Memory](#memory).
+
 **Can two chats work at the same time?** Yes, each in its own browser tab.
 
 **What if I leave a job running with no step limit?** It goes on until it finishes, fails or you stop it. With a paid cloud model, set **Max steps per prompt** to a number you are comfortable with before leaving a job unattended. See [Long tasks](#long-tasks).
 
 **Which model should I use?** One with tool calling and a large context window: a local Qwen, Llama 3.1 or later, Mistral or GPT-OSS model, or a current cloud model. For screenshots and images, one with vision.
 
-**What does it cost?** Local models cost nothing beyond your computer. Cloud models charge per use; long pages, screenshots and long chats use more. The extension itself is free (MIT licence).
+**What does it cost?** Local models cost nothing beyond your computer. Cloud models charge per use; long pages, screenshots and long chats use more. Pictures made with Stability AI, fal.ai, Replicate or Google are charged by that vendor to the account your key belongs to. The extension itself is free (MIT licence).
 
 **Does it work in other browsers?** Yes: in Chrome 116 or later, in Chromium-based browsers (Chromium, Edge, Brave, Opera) with the Chromium download, and in Firefox 128 or later with a few limits (no Trusted input events, no fallback for pages that block scripts, notifications without buttons). See [Install](#install) and [Firefox notes](#firefox-notes).
 

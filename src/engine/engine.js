@@ -7,6 +7,7 @@ import { Agent } from '../agent.js';
 import { assetBlob } from '../files.js';
 import { TO_ENGINE } from '../host/api.js';
 import { stripToolCalls } from '../markdown.js';
+import { originOf } from '../memory.js';
 import { newSession, store, titleFrom } from '../sessions.js';
 import { loadSettings, syncOriginRules } from '../storage.js';
 import { newId, safeParse, sleep, splitThink } from '../util.js';
@@ -51,7 +52,7 @@ const pretty = (v) => (typeof v === 'string' ? v : JSON.stringify(v, null, 2) ??
 const capText = (t) => (t.length > TOOL_TEXT_LIMIT ? `${t.slice(0, TOOL_TEXT_LIMIT)}\n… (${t.length - TOOL_TEXT_LIMIT} more characters)` : t);
 const textOf = (c) => (typeof c === 'string' ? c : Array.isArray(c) ? c.filter((p) => p?.type === 'text').map((p) => p.text).join('\n') : '');
 // History doesn't record failure explicitly; these are the agent's error/denial/cancel replies.
-const toolFailed = (m) => /^(error\b|cancelled\.|the user denied)/i.test(String(m.content ?? ''));
+const toolFailed = (m) => /^(error\b|cancelled\.|stopped by the user|the user denied)/i.test(String(m.content ?? ''));
 
 // Would an assistant bubble with this text show anything (text or thinking)?
 function visible(content, reasoning) {
@@ -287,6 +288,7 @@ class Engine {
       running: s.running,
       asking: s.asking,
       queue: s.queue,
+      notes: s.notes,
       paused: s.paused,
       drain: s.drain,
       saveError: s.saveError,
@@ -339,10 +341,12 @@ class Engine {
       renamed: false,
       muted: false, // ignore agent hooks (while importing or after closing)
       queue: [],
+      notes: '', // per-chat progress log (round-trips with the session body)
       paused: false,
       drain: false, // "Run all remaining" in step mode
       running: false,
       stopRequested: false,
+      afterStop: null, // a fresh instruction sent while a Stop was still unwinding; runs next
       runPromise: Promise.resolve(),
       items: [],
       itemSeq: 0,
@@ -438,6 +442,7 @@ class Engine {
       s.muted = false;
     }
     s.queue = cleanQueue(data.queue);
+    s.notes = typeof data.notes === 'string' ? data.notes : '';
     s.paused = s.queue.length > 0; // a restored queue never starts by itself
     s.drain = false;
     s.stored = true;
@@ -472,6 +477,7 @@ class Engine {
       s.closing = false;
     }
     s.closed = true;
+    s.afterStop = null;
     s.muted = true;
     clearTimeout(s.saveTimer);
     for (const ap of [...s.approvals.values()]) ap.cleanup();
@@ -804,7 +810,7 @@ class Engine {
           return;
         }
         s.dirty = false;
-        const session = { ...s.meta, messages, queue: s.queue.map((q) => ({ id: q.id, text: q.text, attachmentIds: [...q.attachmentIds] })) };
+        const session = { ...s.meta, messages, queue: s.queue.map((q) => ({ id: q.id, text: q.text, attachmentIds: [...q.attachmentIds] })), notes: s.notes || '' };
         try {
           await withTimeout(store.put(session), STORE_TIMEOUT);
         } catch (e) {
@@ -897,7 +903,16 @@ class Engine {
     try {
       // Settings saved a moment ago (another panel, a test) may not have arrived as an event yet.
       await this.reloadSettings().catch(() => {});
-      const opts = { windowId: s.windowId };
+      const opts = {
+        windowId: s.windowId,
+        origin: originOf(s.page?.url || s.meta?.url || ''),
+        notes: s.notes || '',
+        onNotes: (text) => {
+          s.notes = text;
+          this.scheduleSave(s);
+          if (!s.closed) this.broadcast({ t: 'notes', sid: s.id, notes: s.notes });
+        },
+      };
       if (job.kind === 'resume') await agent.resume(this.settings, opts);
       else await agent.run(job.text, ids, this.settings, job.kind === 'queued' ? { ...opts, keepTab: true } : opts);
     } catch (e) {
@@ -912,6 +927,8 @@ class Engine {
     }
     this.setRunning(s, false);
     this.scheduleSave(s);
+    const pend = s.afterStop;
+    s.afterStop = null;
     if (s.closed) return;
     const stopped = s.stopRequested || error?.name === 'AbortError';
     if (error) {
@@ -931,6 +948,14 @@ class Engine {
       s.drain = false;
     }
     this.emitState(s);
+    if (pend) {
+      // A fresh instruction beats a queue that the Stop paused.
+      if (this.modelProblem()) this.returnToComposer(s, pend.text, pend.attachmentIds);
+      else {
+        this.startJob(s, { kind: 'direct', text: pend.text, attachmentIds: pend.attachmentIds });
+        return;
+      }
+    }
     const next = !error && !stopped && this.continueQueue(s);
     if (!next && !stopped) this.notifyJob(s, error);
   }
@@ -1140,6 +1165,12 @@ const COMMANDS = {
     const text = String(m.text ?? '');
     const ids = cleanIds(m.attachmentIds);
     if (!text.trim() && !ids.length) throw new Error('Nothing to send.');
+    if (s.running && s.stopRequested) {
+      // A Stop is still unwinding: this is a fresh instruction, not a queued follow-up. Only the latest one counts.
+      if (s.afterStop) this.returnToComposer(s, s.afterStop.text, s.afterStop.attachmentIds);
+      s.afterStop = { text, attachmentIds: ids };
+      return { queued: true, afterStop: true };
+    }
     if (s.running) {
       // The panel already shows the item under the id it chose.
       const qid = typeof m.qid === 'string' && m.qid && !s.queue.some((x) => x.id === m.qid) ? m.qid : newId();

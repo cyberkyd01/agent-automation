@@ -405,7 +405,7 @@ export const store = {
     try {
       const [meta, body] = await withTx([META, BODY], 'readonly', (t) => Promise.all([reqP(t.objectStore(META).get(id)), reqP(t.objectStore(BODY).get(id))]));
       if (!meta) return null;
-      return { ...normMeta(meta), messages: Array.isArray(body?.messages) ? body.messages : [], queue: Array.isArray(body?.queue) ? body.queue : [] };
+      return { ...normMeta(meta), messages: Array.isArray(body?.messages) ? body.messages : [], queue: Array.isArray(body?.queue) ? body.queue : [], notes: str(body?.notes) };
     } catch (e) {
       throw friendly(e, 'open the chat');
     }
@@ -418,6 +418,7 @@ export const store = {
     // Snapshot the arrays now, so later changes by the caller cannot alter what this call saves.
     const messages = Array.isArray(session.messages) ? session.messages.slice() : [];
     const queue = cleanQueue(session.queue);
+    const notes = str(session.notes);
     const given = { id: session.id, title: session.title, url: session.url, pageTitle: session.pageTitle, createdAt: finite(session.createdAt) };
     return serial(session.id, () =>
       withTx([META, BODY], 'readwrite', async (t) => {
@@ -425,7 +426,7 @@ export const store = {
         let createdAt = given.createdAt;
         if (createdAt == null) createdAt = finite((await reqP(metaStore.get(given.id)))?.createdAt) ?? Date.now();
         metaStore.put(metaFor(given, messages, createdAt, Date.now()));
-        t.objectStore(BODY).put({ id: given.id, messages, queue });
+        t.objectStore(BODY).put({ id: given.id, messages, queue, notes });
       })
     ).catch((e) => {
       throw friendly(e, 'save the chat');
@@ -616,7 +617,7 @@ export const store = {
         const clean = cleanAsset(a, blob);
         if (clean) assets.set(clean.id, clean);
       }
-      prepared.push({ s, messages, queue: cleanQueue(s.queue), assets: [...assets.values()] });
+      prepared.push({ s, messages, queue: cleanQueue(s.queue), notes: str(s.notes), assets: [...assets.values()] });
     }
     if (!prepared.length) throw readable('This export file does not contain any chats.');
 
@@ -626,7 +627,7 @@ export const store = {
         const taken = new Set((await reqP(metas.getAll())).map((m) => str(m.title)));
         const ids = [];
         const now = Date.now();
-        for (const { s, messages, queue, assets } of prepared) {
+        for (const { s, messages, queue, notes, assets } of prepared) {
           const id = uuid();
           const typed = previewOf(messages);
           let title = cleanTitle(s.title) || (typed ? titleFrom(typed) : 'Imported chat');
@@ -635,7 +636,7 @@ export const store = {
           const createdAt = finite(s.createdAt) ?? finite(s.updatedAt) ?? now;
           const updatedAt = finite(s.updatedAt) ?? createdAt;
           metas.put(metaFor({ id, title, url: s.url, pageTitle: s.pageTitle }, messages, createdAt, updatedAt));
-          t.objectStore(BODY).put({ id, messages, queue });
+          t.objectStore(BODY).put({ id, messages, queue, notes });
           for (const a of assets) t.objectStore(ASSET).put({ ...a, sessionId: id });
           ids.push(id);
         }
@@ -662,7 +663,7 @@ export const store = {
         const nid = uuid();
         const messages = Array.isArray(body?.messages) ? body.messages : [];
         metas.put(metaFor({ id: nid, title: cleanTitle(title) || `${src.title} (copy)`, url: src.url, pageTitle: src.pageTitle }, messages, src.createdAt, src.updatedAt));
-        t.objectStore(BODY).put({ id: nid, messages, queue: Array.isArray(body?.queue) ? body.queue : [] });
+        t.objectStore(BODY).put({ id: nid, messages, queue: Array.isArray(body?.queue) ? body.queue : [], notes: str(body?.notes) });
         for (const rec of rows) {
           const a = toAsset(rec);
           if (a) t.objectStore(ASSET).put({ ...a, sessionId: nid });
@@ -718,7 +719,7 @@ function rewriteLegacy(sessionId, assets) {
 }
 
 function exportEntry(meta, body, assets) {
-  const entry = { ...normMeta(meta), messages: Array.isArray(body?.messages) ? body.messages : [], queue: Array.isArray(body?.queue) ? body.queue : [] };
+  const entry = { ...normMeta(meta), messages: Array.isArray(body?.messages) ? body.messages : [], queue: Array.isArray(body?.queue) ? body.queue : [], notes: str(body?.notes) };
   if (assets) entry.assets = assets.map(toAsset).filter(Boolean).sort(assetOrder);
   return entry;
 }
@@ -762,6 +763,7 @@ export function newSession(partial = {}) {
   s.title = str(s.title) || 'New chat';
   s.messages = Array.isArray(partial.messages) ? partial.messages : [];
   s.queue = Array.isArray(partial.queue) ? partial.queue : [];
+  s.notes = str(partial.notes);
   s.messageCount = s.messages.length;
   s.preview = previewOf(s.messages);
   return s;

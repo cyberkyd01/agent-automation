@@ -6,7 +6,15 @@ It runs in Chrome, in other Chromium-based browsers (Chromium, Edge, Brave, Oper
 
 **[User guide](docs/USER_GUIDE.md)**: a tour of the panel, step-by-step recipes for common jobs, every setting, and troubleshooting.
 
-Version 1.3 adds:
+Version 1.5 adds:
+
+- **Memory.** The agent keeps a short progress note inside each chat, so a long job does not repeat finished items, and it can save lasting facts that carry across chats, for everywhere or for one website. You review and delete what it saved in Settings → **Memory**. See [Memory](#memory).
+
+Version 1.4 added:
+
+- **More ways to make and edit images.** Settings → **Images** is now a **Vendor** list. The agent can already make and edit images with your **main chat model** if that model can output images: choose **Your main chat model**. You can also use an **OpenAI-compatible provider**, or paste your own API key for **Stability AI**, **fal.ai**, **Replicate** or **Google (Gemini / Imagen)**. See [Images](#images).
+
+Version 1.3 added:
 
 - **A redesigned Settings screen.** Settings is now a home page with a **Getting started** card and one card for each area, and every area has its own page. Computer tools and Remote access are numbered steps that tick themselves. See [The Settings screen](#the-settings-screen).
 - **Use your models from other apps.** The tunnel behind Remote access also works as an OpenAI-compatible address, so any app that lets you add such a provider can use your local models. See [Remote access](#remote-access-use-your-models-from-another-browser-or-app).
@@ -24,13 +32,13 @@ Requires Chrome 116 or later (or a Chromium-based browser of the same age), or F
 
 ## Install
 
-Pick the download for your browser from the [Releases page](https://github.com/cyberkyd01/agent-automation/releases/latest). Version 1.3.0 has these files:
+Pick the download for your browser from the [Releases page](https://github.com/cyberkyd01/agent-automation/releases/latest). Version 1.5.0 has these files:
 
 | File | For |
 |---|---|
-| `agent-automation-chrome-v1.3.0.zip` | Chrome |
-| `agent-automation-chromium-v1.3.0.zip` | Chromium, Edge, Brave and Opera. It is the same build as the Chrome one, in its own file. |
-| `agent-automation-firefox-v1.3.0.zip` and `agent-automation-firefox-v1.3.0.xpi` | Firefox |
+| `agent-automation-chrome-v1.5.0.zip` | Chrome |
+| `agent-automation-chromium-v1.5.0.zip` | Chromium, Edge, Brave and Opera. It is the same build as the Chrome one, in its own file. |
+| `agent-automation-firefox-v1.5.0.zip` and `agent-automation-firefox-v1.5.0.xpi` | Firefox |
 | `agent-companion.mjs` | Optional: computer tools, terminals, desktop and application tools, and remote access (see [Computer tools](#computer-tools-and-local-mcp-servers-companion)) |
 
 ### Chrome and other Chromium-based browsers
@@ -46,7 +54,7 @@ Chrome only installs `.crx` files that come from the Chrome Web Store, which is 
 
 ### Firefox
 
-1. Download `agent-automation-firefox-v1.3.0.xpi` (or the zip).
+1. Download `agent-automation-firefox-v1.5.0.xpi` (or the zip).
 2. Open `about:debugging#/runtime/this-firefox`.
 3. Click **Load Temporary Add-on…** and pick the `.xpi`. If you built it from source, pick `manifest.json` in `dist/firefox`. The sidebar opens by itself.
 4. The toolbar button, or **Ctrl+Shift+Y** (Mac: **Cmd+Shift+Y**), opens and closes the sidebar. If the shortcut does nothing, set another one in `about:addons` (gear menu, **Manage Extension Shortcuts**).
@@ -101,11 +109,11 @@ Models that are already loaded in LM Studio are listed first and marked "loaded"
 
 ### The Settings screen
 
-Settings opens on a home page. A **Getting started** card at the top has three steps (1 **Connect a model**, 2 **Try a task**, 3 **Optional: computer tools, remote access**) that tick themselves, with a button for each. Below it is one card for each area, each with a status pill: **Models & providers**, **Images**, **Behaviour**, **Computer tools**, **Remote access**, **Remote MCP servers** and **About & help**.
+Settings opens on a home page. A **Getting started** card at the top has three steps (1 **Connect a model**, 2 **Try a task**, 3 **Optional: computer tools, remote access**) that tick themselves, with a button for each. Below it is one card for each area, each with a status pill: **Models & providers**, **Images**, **Behaviour**, **Memory**, **Computer tools**, **Remote access**, **Remote MCP servers** and **About & help**.
 
 <img src="docs/images/settings-home.png" alt="The Settings home page: a Getting started card with three numbered steps (Connect a model, Try a task, Optional: computer tools, remote access), then cards for Models & providers (amber pill 'No model chosen'), Images (grey pill 'Off') and Behaviour (blue pill 'Ask before acting · no step limit'), each with an icon and a one-line purpose." width="400">
 
-Click a card to open that area on its own page. **‹ Settings** at the top left goes back to the home page, and **Esc** does the same (on the home page, **Esc** closes Settings). Each page starts with **What this does**, groups its controls into cards, and folds the settings you rarely need under **Advanced** (on Behaviour: temperature, context budget, max tool output, trusted input events; on Remote access: the named tunnel). Changes are saved automatically.
+Click a card to open that area on its own page. **‹ Settings** at the top left goes back to the home page, and **Esc** does the same (on the home page, **Esc** closes Settings). Each page starts with **What this does**, groups its controls into cards, and folds the settings you rarely need under **Advanced** (on Behaviour: temperature, context budget, max tool output, trusted input events; on Remote access: the named tunnel; on Images: a vendor's Base URL). Changes are saved automatically.
 
 ## Local models: context window and tool calling
 
@@ -130,7 +138,8 @@ Click a card to open that area on its own page. **‹ Settings** at the top left
 | Scripts | run JavaScript in the page |
 | Web | web search, fetch a URL |
 | Files | `read_file` (the text of an attached file or a file URL), upload any file into a file input, download any file |
-| Images | generate, edit, view, preview on the page |
+| Images | `generate_image` and `edit_image` (set up in Settings → Images; see [Images](#images)), view, preview on the page |
+| Memory | `update_progress`, `remember`, `recall`, `forget` (none of them ask; see [Memory](#memory)) |
 | Remote MCP | any tools from the MCP servers you add |
 | Computer | with the companion connected, tools named `mcp_computer_…`: run commands, read and write files, clipboard, and more (see below) |
 | Desktop | with the companion on Linux or macOS (Windows: untested): list and launch apps, list, focus and close windows, screenshot the whole screen, press keys and type into other programs |
@@ -144,6 +153,7 @@ Click a card to open that area on its own page. **‹ Settings** at the top left
 - "For every product in this table set status to Archived if stock is 0."
 - "Compare our pricing page with three competitors and list features we lack."
 - "Generate a 1200x630 banner for this article and upload it to the cover image field."
+- "Edit this product photo: remove the background."
 - "Fill in this form with the details below: …"
 - "Read the attached PDF and fill in this form from it."
 - With desktop tools on Linux: "Open the text editor, type the list above into it and take a screenshot of the screen."
@@ -223,12 +233,46 @@ Limits:
 
 ## Images
 
-Settings → **Images**: choose a provider (the default, **None (image tools off)**, keeps the image tools off) and an image model, then a mode:
+The agent's `generate_image` and `edit_image` tools use whatever you choose in Settings → **Images**. **The agent can already generate and edit images with your main chat model, if that model supports image output.** Choose **Your main chat model** and you are done: no key and no extra model. You only need another vendor here if your workflow wants a different one.
 
-- **Images API**: for OpenAI-style `/images/generations` and `/images/edits` endpoints (OpenAI, LocalAI and similar).
-- **Chat completions with image output**: for multimodal chat models that return images, for example Gemini image models via OpenRouter.
+<img src="docs/images/settings-images.png" alt="Settings, Images page, with the vendor set to Stability AI: the 'What this does' note, an Image vendor card with the Vendor list, an API key field (hidden as dots) with a Show button, the hint 'Stored in this browser only, and sent only to Stability AI.', a Get a key link, a Model field (sd3.5-large), a Size field and a Test button, and below it an Advanced card with the hint 'Change this only to use a proxy or a server you run yourself.' and a Base URL field (here holding a local test address), with the hint 'Blank uses https://api.stability.ai.'" width="400">
 
-The agent can take an image from the page, edit it, preview the result in place on the page, and upload it through the site's own upload field.
+The **Vendor** list has these choices. The default, **None (image tools off)**, keeps the image tools off; they then tell you to set things up in Settings → Images.
+
+| Vendor | What you set |
+|---|---|
+| **Your main chat model** | Nothing. It uses the model chosen in the panel header, when that model can output images. |
+| **OpenAI-compatible provider** | One of your OpenAI-compatible providers, then the **API mode** (**Images API** for `/images/generations` and `/images/edits`, or **Chat completions with image output**, for example Gemini image models via OpenRouter), a **Model** and an optional **Size**. |
+| **Stability AI**, **fal.ai**, **Replicate**, **Google (Gemini / Imagen)** | Your own API key (bring your own key), a **Model**, an optional **Size** and, under **Advanced**, an optional **Base URL**. **Get a key** opens the vendor's page for API keys. |
+
+For the four hosted vendors, the **Model** field suggests these models. You can type any other model ID, and if you leave it blank the first one is used:
+
+- **Stability AI:** `core`, `ultra`, `sd3.5-large`, `sd3.5-large-turbo`, `sd3.5-medium`
+- **fal.ai:** `fal-ai/flux/dev`, `fal-ai/flux/schnell`, `fal-ai/flux-pro/v1.1`, `fal-ai/flux/dev/image-to-image`, `fal-ai/fast-sdxl`
+- **Replicate:** `black-forest-labs/flux-dev`, `black-forest-labs/flux-schnell`, `black-forest-labs/flux-1.1-pro`, `stability-ai/sdxl`. Any `owner/name` or `owner/name:version` works.
+- **Google (Gemini / Imagen):** `gemini-2.5-flash-image` (the default), `imagen-4.0-generate-001`, `imagen-4.0-ultra-generate-001`. Google has retired Imagen 3, so the Gemini image model is the default.
+
+The API key is stored unencrypted in this browser's local storage, like your other API keys, and is sent only to that vendor. The vendor charges your own account with it for each image. Whether a size or editing works depends on the vendor and the model. A **Test** button checks the key (fal.ai checks it on first use). Image settings from version 1.3 carry over: a provider you had chosen shows as **OpenAI-compatible provider**.
+
+The agent can take an image from the page, edit it, preview the result in place on the page, and upload it through the site's own upload field. More in the [user guide](docs/USER_GUIDE.md#choosing-an-image-vendor).
+
+## Memory
+
+Version 1.5 gives the agent two kinds of memory. Both are stored on this computer.
+
+- **A progress log for each chat.** During a long or bulk job the agent keeps a short running note of what it has done and what is left (the `update_progress` tool). The note stays with the chat and is given back to the model on every request, even when older messages are trimmed to fit the **Context budget**, so a long job does not start the finished items again. The agent keeps it up to date by itself. There is no separate panel for it in this version.
+- **Memory across chats.** The agent can save a lasting fact, for **Global** (everywhere) or for one **website** (the site in the active tab). It saves a fact itself when it learns something worth keeping, and you can ask. Saved notes for Global and for the current site are added to the start of each run, so a fresh chat already knows them, up to the size set under **How much to include**. At most 200 are kept.
+
+Examples:
+
+- "Remember that our refund window is 30 days."
+- "Remember for this site that the admin login is at /wp-admin and orders are under Shop > Orders."
+- "Forget what you saved about the refund window."
+- "What do you remember about this site?"
+
+The tools are `remember`, `recall` and `forget`. None of the memory tools ask for approval, because they only read and write these local notes.
+
+Settings → **Memory** (pill: "On · N saved", or "Off") has a **Use saved memories** switch, a searchable list of everything saved (grouped under Global and by website, each with a delete button that needs a second click), **Clear this site** and **Clear all**, and under **Advanced** **How much to include** (default 4000 characters; 0 adds nothing to requests but deletes nothing). The agent writes the notes; you manage them here. More in the [user guide](docs/USER_GUIDE.md#memory).
 
 ## Remote MCP servers
 
@@ -343,9 +387,9 @@ More in the [user guide](docs/USER_GUIDE.md#remote-access) and [`companion/READM
 - **Act without asking**: no approval prompts for browser actions, for unattended bulk work.
 - The **Stop** button (or **Esc**) halts a run at any point.
 - Page content is treated as data, not instructions, but no model is immune to prompt injection. Be careful with **Act without asking** on sites you don't control, and review replies before letting the agent send messages to customers.
-- API keys are stored unencrypted in the extension's local storage on this computer. They are sent only to the provider you configured them for.
+- API keys, including the ones for image vendors, are stored unencrypted in the extension's local storage on this computer. They are sent only to the provider or vendor you configured them for.
 - **Trusted input events** (Settings → Behaviour → Advanced) uses Chrome's debugger to send real mouse and keyboard events, for sites that ignore simulated ones. Chrome shows a debugging banner at the top of the window while it is active. The debugger is also used to run scripts on pages whose security policy blocks them, so the banner can appear then too. Firefox does not have Chrome's debugger API, so neither feature works there.
-- Chats and attached files are stored unencrypted in the browser profile on this computer. Delete a chat in History to remove it and its files.
+- Chats and attached files are stored unencrypted in the browser profile on this computer. Delete a chat in History to remove it and its files. Saved memories are stored the same way; delete them in Settings → Memory.
 
 ### Computer tools
 
@@ -365,7 +409,7 @@ Computer tools run with the permissions of your user account. They can read, cha
 | "Cannot reach …" | The local server isn't running, or the URL or port is wrong. |
 | It loops, ignores tools or invents results | The context window is too small (see above), or the model isn't capable enough. Try a larger context or a stronger model. |
 | Context-length errors with a small model | Lower **Context budget** in Settings. |
-| A very long chat seems to forget its start | Older messages are trimmed for the model to fit the **Context budget**. The chat itself keeps everything. |
+| A very long chat seems to forget its start | Older messages are trimmed for the model to fit the **Context budget**. The chat itself keeps everything. The agent's progress note is never trimmed; ask it to keep it current, or to remember lasting facts (see [Memory](#memory)). |
 | "Could not attach the debugger" | DevTools is open on that tab. Close it; debugger-based features don't work on a tab while DevTools is open. |
 | The model list is empty | Check the URL and API key with **Test connection**. You can still enter a **Custom model ID…**. |
 | A run stopped on its own | It finished, you pressed Stop, an error ended it (use **Retry**), you set a step limit and it was reached, or the browser or extension was closed or reloaded (use **Continue**). Hiding the panel does not stop a run. |
@@ -377,6 +421,8 @@ Computer tools run with the permissions of your user account. They can read, cha
 | A desktop tool is missing | Settings → Computer tools → Desktop tools lists the missing helpers and what to install. |
 | No terminal tools | **Allow shell commands** is off in Settings → Computer tools. Terminal sessions, `run_applescript` and `run_powershell` need it. |
 | The tunnel will not start | See [`companion/README.md`](companion/README.md#troubleshooting). |
+| "No image model configured" | **Vendor** in Settings → Images is still **None (image tools off)**. Choose a vendor; **Your main chat model** needs nothing else. |
+| An image vendor answers 401 or 403 | The API key is wrong or belongs to another service. Paste it again in Settings → Images and click **Test**. |
 | The chat says **Connect a model to start** | No provider has a model yet. Click **Open Models & providers**, click **Test connection** on your provider, and choose a model in the header. |
 | Remote access: "has nothing to add" (when you paste a connection code) | No model is shared. On the model computer, Settings → Remote access, step 2: turn on **Expose local models** and tick at least one model, then copy the code again. |
 | Remote access: error 401 | Wrong token. Paste the current connection code, or, in another app, use the companion's token as the API key. |
@@ -397,10 +443,12 @@ Computer tools run with the permissions of your user account. They can read, cha
 | `src/agent.js` | Agent loop, including the loop guard |
 | `src/providers.js` | OpenAI-compatible and Anthropic adapters, streaming, prompted tool-calling fallback |
 | `src/tools.js` | Browser, search, file and image tools |
+| `src/image.js` | The image vendors (their names, suggested models and key links) and the code that generates and edits images with each of them |
 | `src/page.js` | Code injected into web pages |
 | `src/cdp.js` | Chrome debugger helpers (trusted input, script fallback) |
 | `src/mcp.js` | MCP client |
 | `src/files.js` | Attached files: type detection and text extraction |
+| `src/memory.js` | Saved memories: storage, the 200-note limit, and picking the notes to add to a request |
 | `src/sessions.js` | Saved chats: storage, export and import |
 | `src/settings-ui.js` | Settings: the home page and the Models & providers, Images, Behaviour, Remote MCP servers and About & help pages |
 | `src/settings-tools-ui.js` | The Computer tools and Remote access pages, Add from connection code, and the Remote MCP server test |

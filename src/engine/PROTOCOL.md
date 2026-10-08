@@ -29,6 +29,7 @@ jobs then become desktop notifications.
 | `state { s: State }` | one chat's state changed |
 | `items { sid, items: Item[], assets: AssetMeta[] }` | a chat's whole transcript (after loading, or a new chat) |
 | `item { sid, item }` | add an item, or replace the item with that `id` (streaming text, tool finished, approval …) |
+| `notes { id, notes }` | the chat's progress log changed (the agent called `update_progress`); `notes` is also in `State` |
 | `itemRemoved { sid, id }` | an item disappears (an empty answer bubble, a prompt handed back) |
 | `asset { sid, asset: AssetMeta }` / `assetRemoved { sid, id }` | the chat's assets changed |
 | `status { text, kind }` | for the status line (e.g. "Choose a model first" when a queued job cannot start) |
@@ -37,7 +38,8 @@ jobs then become desktop notifications.
 | `reply { rid, ok, value?, error? }` | the answer to a command that carried `rid` (`error` is a readable message) |
 
 `State = { id, meta: { id, title, createdAt, updatedAt, url, pageTitle }, stored, ready, loadError: { text, retry } | null,
-running, asking (number of pending approvals), queue: QueueItem[], paused, drain, saveError: string | null, closeBlocked }`
+running, asking (number of pending approvals), queue: QueueItem[], notes (the per-chat progress log, '' when none),
+paused, drain, saveError: string | null, closeBlocked }`
 
 `Item` (all have `id`, unique within the chat):
 - `{ type: 'user', text, atts: [{ id, kind, name, mime, size, src? }] }` — `src` only for v1.0 inline images

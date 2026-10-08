@@ -1,12 +1,13 @@
 import { api } from './host/api.js';
 import { TOOLS, toDataUrl, modelImage, assetText } from './tools.js';
+import { memStore } from './memory.js';
 import { chat } from './providers.js';
 import { McpPool, companionServer } from './mcp.js';
 import { detachAll } from './cdp.js';
 import { splitThink, pause, isImageMime, mimeOf, dataUrlSize, withExt } from './util.js';
 import { assetBlob, checkAttachSize, fileToAssetData, formatBytes, guessMime, isBlob, toBlob } from './files.js';
 
-function systemPrompt(settings, { computer = false } = {}) {
+function systemPrompt(settings, { computer = false, notes = '', memories = [], origin = '' } = {}) {
   let s = `You are Agent Automation, an AI agent running in a Chrome side panel next to the user's browser tabs. You act on the user's behalf in their own browser: reading pages, clicking, typing, filling forms, replying to messages, running bulk operations, researching on the web and working with images and files. You are also a general assistant — answer any question, whether or not it relates to the open page.
 
 Current date: ${new Date().toDateString()}
@@ -18,6 +19,7 @@ Current date: ${new Date().toDateString()}
 - Long pages are paginated. Use filter or offset to find what you need instead of reading everything.
 - For anything that needs outside information, use web_search and fetch_url, or open pages in new tabs (background: true keeps the user's page in view). Compare sources and cite URLs.
 - Bulk tasks: work through items one at a time, keep count, and finish with a summary of what was done and anything skipped or failed.
+- For long or repetitive work, keep update_progress current so you never redo finished items. Use remember for durable facts the user wants kept or that help later chats on this site (they outlive this chat); recall to look them up; forget to remove one.
 - Use run_javascript for extraction or bulk DOM work when the simpler tools are inefficient.
 - Assets are images (img_1, img_2, …) and other files (file_1, file_2, …): the user's attachments, images from generate_image / edit_image, and files from fetch_url or MCP tools. upload_file puts any asset into a page's file input, download saves it, read_file reads a file's text, view_image looks at an image, set_page_image previews an image on the page.
 - Files the user attaches are listed in an <attachments> block in their message, with the text of readable files; long ones are cut short — read the rest with read_file.
@@ -34,8 +36,25 @@ Current date: ${new Date().toDateString()}
 - Applications: launch_app opens one. To work inside it, prefer scripting over keystrokes: run_applescript on macOS (TextEdit, Excel, Numbers, Terminal, Finder, Mail…), run_powershell with COM on Windows (Excel, Word), app_read_text / app_write_text for any text editor, LibreOffice headless on Linux. Use send_keys, type_in_app and desktop_screenshot only when no scripting route exists, and take a screenshot to verify when you cannot read the result back.
 - Work step by step: act, read the response, then decide the next step; report what you did and what you saw.`;
   }
+  if (notes && notes.trim()) s += `\n\n## Progress so far (this chat)\n${notes.trim()}`;
+  if (settings.memory?.enabled && memories && memories.length) {
+    const lead = `Saved from earlier chats — global${origin ? `, and for ${origin}` : ''}. Use them; they persist across chats.`;
+    const lines = memories.map((m) => `- [${m.scope === 'global' ? 'global' : 'site'}] ${m.text}`);
+    s += `\n\n## Remembered notes\n${lead}\n${lines.join('\n')}`;
+  }
   if (settings.customPrompt) s += `\n\n## User's custom instructions\n${settings.customPrompt}`;
   return s;
+}
+
+// The progress log is never trimmed by context trimming, so it is capped on write: head + marker + tail.
+const NOTES_MAX = 8000;
+const NOTES_MARK = '\n…[older progress trimmed]\n';
+function capNotes(text) {
+  const t = String(text ?? '');
+  if (t.length <= NOTES_MAX) return t;
+  const keep = NOTES_MAX - NOTES_MARK.length;
+  const head = Math.floor(keep / 2);
+  return t.slice(0, head) + NOTES_MARK + t.slice(t.length - (keep - head));
 }
 
 /* ---------- history helpers ---------- */
@@ -89,7 +108,7 @@ function repair(history) {
     while (j < history.length && history[j].role === 'tool') answered.add(history[j++].tool_call_id);
     const missing = calls
       .filter((tc) => !answered.has(tc.id))
-      .map((tc) => ({ role: 'tool', tool_call_id: tc.id, name: tc.function?.name, content: 'Cancelled.' }));
+      .map((tc) => ({ role: 'tool', tool_call_id: tc.id, name: tc.function?.name, content: 'Stopped by the user before this finished. Do not retry it.' }));
     history.splice(j, 0, ...missing);
     added += missing.length;
     i = j + missing.length - 1;
@@ -186,6 +205,7 @@ export class Agent {
     this.autoApprove = false;
     this.allowedTools = new Set(); // sensitive tools the user allowed for this chat
     this.controller = null;
+    this.interrupted = false; // the user pressed Stop on the last run; the next fresh message says so
     this.assets = new Map();
     this.counters = { img: 0, file: 0 };
     this.collect = null; // ids of assets created by the tool call in progress
@@ -193,11 +213,16 @@ export class Agent {
     this.caps = {};
     this.mcp = new McpPool();
     this.imageUrls = new WeakMap(); // asset → Promise<data URL | null>, for restored image attachments
+    this._onNotes = null; // the engine's hook to persist the progress log; absent in tests/panel
     this.ctx = {
       settings: null,
       signal: null,
       tabId: null,
       windowId: null,
+      origin: '', // the run's active-tab origin ('' for chrome:, about:, blank)
+      notes: '', // the chat's current progress log
+      memory: memStore, // cross-chat memory store
+      setNotes: (text) => this.setNotes(text),
       vision: () => this.ctx.settings?.vision !== 'off' && !this.caps.noImages,
       // content: a Blob/File or a data: URL. info: { label, name?, mime? } — or just a label (v1.0 callers).
       addAsset: (content, info) => this.addAsset(content, info, true),
@@ -213,6 +238,19 @@ export class Agent {
   get canResume() {
     const last = this.messages[this.messages.length - 1];
     return !this.running && (last?.role === 'user' || last?.role === 'tool');
+  }
+
+  // The progress log tool writes through here: cap it, update ctx.notes (so the next step's system prompt
+  // reflects it) and persist via the engine hook when one was provided.
+  setNotes(text) {
+    const capped = capNotes(text);
+    this.ctx.notes = capped;
+    try {
+      this._onNotes?.(capped);
+    } catch (e) {
+      console.error('onNotes hook failed', e);
+    }
+    return capped;
   }
 
   /* ----- history: every change goes through edit(), so hooks.onChange can't be missed ----- */
@@ -317,12 +355,22 @@ export class Agent {
   // (the panel's); without it, the last focused one.
   async run(text, attachmentIds = [], settings, opts = {}) {
     return this.drive(settings, async (history, signal) => {
+      const wasInterrupted = this.interrupted;
+      this.interrupted = false;
       const { tab, kept } = await this.pickTab(!!opts.keepTab, opts.windowId);
       const where = tab ? `id=${tab.id} "${tab.title || ''}" ${tab.url || tab.pendingUrl || ''}` : 'none';
       const msg = await this.userMessage(text, attachmentIds, settings, signal, `${kept ? 'Current' : 'Active'} tab: ${where}`);
+      // A fresh instruction right after a Stop: tell the model the old task is abandoned.
+      if (wasInterrupted && history.some((m) => m?.role === 'user')) {
+        // Stop the model blindly resuming the old plan, but keep the earlier work available: the user may be
+        // redirecting, or may be building on it (e.g. "continue but skip what you've done", "keep the context").
+        const note = 'I stopped the previous task before it finished. Do not automatically keep working on it — follow the instruction below instead. You may still use the earlier messages as context when my request refers to them or builds on that work:\n\n';
+        if (typeof msg.content === 'string') msg.content = note + msg.content;
+        else if (Array.isArray(msg.content) && msg.content[0]?.type === 'text') msg.content[0] = { ...msg.content[0], text: note + msg.content[0].text };
+      }
       this.edit(history, repair);
       this.push(history, msg);
-    });
+    }, opts);
   }
 
   // Continues after an error or a Stop without adding a user message.
@@ -331,7 +379,7 @@ export class Agent {
     if (!this.canResume) throw new Error('There is nothing to resume — send a new message instead.');
     return this.drive(settings, async () => {
       await this.pickTab(true, opts.windowId);
-    });
+    }, opts);
   }
 
   // keep: stay on the tab the previous run ended on, if it still exists.
@@ -404,8 +452,8 @@ export class Agent {
   }
 
   // The agent loop shared by run() and resume(). `prepare` adds the user message (or nothing).
-  async drive(settings, prepare) {
-    this.stop();
+  async drive(settings, prepare, opts = {}) {
+    this.controller?.abort();
     const controller = (this.controller = new AbortController());
     const { signal } = controller;
     // reset()/importMessages() swap in a new array, so a run still unwinding can't touch the new chat.
@@ -413,6 +461,10 @@ export class Agent {
     const ctx = this.ctx;
     try {
       Object.assign(ctx, { settings, signal });
+      // Progress log + cross-chat memory inputs for this run. onNotes persists it; notes/origin default safely.
+      ctx.origin = String(opts.origin || '');
+      ctx.notes = String(opts.notes || '');
+      this._onNotes = typeof opts.onNotes === 'function' ? opts.onNotes : null;
       const mcpReady = this.mcpTools(settings, signal); // connects while the message is being built
       await prepare(history, signal);
 
@@ -429,7 +481,16 @@ export class Agent {
       signal.throwIfAborted();
       const tools = [...TOOLS, ...extra];
       const byName = new Map(tools.map((t) => [t.name, t]));
-      const system = systemPrompt(settings, { computer: extra.some((t) => t.sensitive) });
+      const computer = extra.some((t) => t.sensitive);
+      // Fetch the relevant memories ONCE per run (not per step): 'global' + this origin, within the budget.
+      let memories = [];
+      if (settings.memory?.enabled) {
+        try {
+          memories = await memStore.relevant(ctx.origin, settings.memory.maxInjectChars);
+        } catch (e) {
+          console.warn('Could not load saved memories', e);
+        }
+      }
       // 0 (the default) = no limit: a run ends when the model is done or the user presses Stop.
       const maxSteps = Number(settings.maxSteps) > 0 ? Math.floor(Number(settings.maxSteps)) : Infinity;
       const loop = { key: '', count: 0 };
@@ -440,6 +501,8 @@ export class Agent {
           break;
         }
         signal.throwIfAborted();
+        // Rebuilt each step so the Progress block reflects the latest ctx.notes; memories are the once-fetched list.
+        const system = systemPrompt(settings, { computer, notes: ctx.notes, memories, origin: ctx.origin });
         const { resp, view } = await this.request({ provider, model, system, tools, settings, signal, caps }, history);
 
         const { think, body: answer } = splitThink(resp.content);
@@ -486,6 +549,9 @@ export class Agent {
       }
     } finally {
       this.edit(history, repair);
+      // A run that finished without being stopped clears the flag, so a later normal message (even after a
+      // Stop → Resume → normal finish) isn't wrongly marked as redirecting away from an abandoned task.
+      if (!controller.signal.aborted) this.interrupted = false;
       if (this.controller === controller) this.controller = null;
       await detachAll().catch(() => {});
     }
@@ -650,11 +716,16 @@ export class Agent {
   }
 
   stop() {
+    if (this.controller) this.interrupted = true;
     this.controller?.abort();
   }
 
   reset() {
     this.stop();
+    this.interrupted = false;
+    this.ctx.notes = '';
+    this.ctx.origin = '';
+    this._onNotes = null;
     this.messages = [];
     this.assets.clear();
     this.counters = { img: 0, file: 0 };
